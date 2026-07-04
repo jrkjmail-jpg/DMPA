@@ -230,6 +230,48 @@ h3 {
   padding: 16px;
 }
 
+.comparison-model-panel {
+  background: #ffffff;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 16px;
+}
+
+.model-tabs {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.model-tabs button {
+  align-items: flex-start;
+  background: #f6f9fd;
+  flex-direction: column;
+  justify-content: flex-start;
+  min-height: 120px;
+  text-align: left;
+}
+
+.model-tabs button.selected {
+  background: #eaf4ff;
+  border-color: #0f6fdd;
+  box-shadow: 0 10px 24px rgba(15, 111, 221, 0.14);
+}
+
+.model-tabs strong {
+  font-size: 15px;
+}
+
+.model-tabs span {
+  color: #52677c;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
 .settings-title {
   align-items: center;
   display: flex;
@@ -488,6 +530,72 @@ h3 {
   border-radius: 8px;
   margin-top: 18px;
   padding: 16px;
+}
+
+.skeleton-lab {
+  background: #ffffff;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  margin-top: 12px;
+  padding: 16px;
+}
+
+.skeleton-lab.hidden {
+  display: none;
+}
+
+.skeleton-canvas {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  display: block;
+  height: 360px;
+  width: 100%;
+}
+
+.skeleton-left {
+  background: #28d7a4;
+}
+
+.skeleton-right {
+  background: #55a4ff;
+}
+
+.pose-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.pose-card {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pose-card canvas {
+  background: #101827;
+  display: block;
+  height: 170px;
+  width: 100%;
+}
+
+.pose-card strong,
+.pose-card span {
+  display: block;
+  padding: 0 10px;
+}
+
+.pose-card strong {
+  font-size: 20px;
+  padding-top: 10px;
+}
+
+.pose-card span {
+  color: #52677c;
+  font-size: 13px;
+  font-weight: 800;
+  padding-bottom: 10px;
+  padding-top: 3px;
 }
 
 .sync-header {
@@ -813,7 +921,9 @@ h3 {
   .analysis-panel,
   .metrics,
   .lab-controls,
-  .settings-grid {
+  .settings-grid,
+  .model-tabs,
+  .pose-grid {
     grid-template-columns: 1fr;
   }
 
@@ -878,5 +988,9 @@ h3 {
 
   .angle-table {
     overflow-x: auto;
+  }
+
+  .skeleton-canvas {
+    height: 300px;
   }
 }

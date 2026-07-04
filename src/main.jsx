@@ -39,6 +39,29 @@ const defaultMediaPipeSettings = {
   }
 };
 
+const comparisonModels = {
+  angles: {
+    title: "Углы",
+    shortTitle: "1. Углы",
+    description:
+      "Базовая модель: сравнивает углы локтей, плеч, бедер, коленей и корпуса на синхронных кадрах. Хорошо показывает, где именно суставы расходятся."
+  },
+  overlay: {
+    title: "Наложение",
+    shortTitle: "2. Наложение",
+    description:
+      "Скелеты нормализуются по центру корпуса и масштабу тела, затем накладываются друг на друга. Оценка строится по средней дистанции выбранных точек."
+  },
+  poses: {
+    title: "Позы",
+    shortTitle: "3. Позы",
+    description:
+      "Модель ищет сильные импульсы в музыке, делает ключевые снимки позы на этих моментах и сравнивает каждую позу гибридно: углы плюс наложение."
+  }
+};
+
+const comparisonModelKey = "dmpa.comparison.model.v1";
+
 const landmarkNames = {
   0: "нос",
   11: "левое плечо",
@@ -282,6 +305,279 @@ function compareScans(leftScan, rightScan, sync, regions = defaultMediaPipeSetti
       : null,
     verdict: verdictForScore(score, suggestions)
   };
+}
+
+function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio) {
+  if (model === "overlay") return compareOverlayScans(leftScan, rightScan, sync, regions);
+  if (model === "poses") return compareImpulsePoseScans(leftScan, rightScan, sync, regions, leftAudio);
+  return compareScans(leftScan, rightScan, sync, regions);
+}
+
+function compareOverlayFrames(left, right, regions = defaultMediaPipeSettings.regions) {
+  if (!left?.landmarks?.length || !right?.landmarks?.length) {
+    return {
+      ready: false,
+      score: 0,
+      verdict: "Сначала отсканируйте скелет в левом и правом видео.",
+      rows: [],
+      suggestions: []
+    };
+  }
+
+  const ids = overlayLandmarkIds(regions);
+  const normalizedLeft = normalizeSkeleton(left.landmarks);
+  const normalizedRight = normalizeSkeleton(right.landmarks);
+  if (!normalizedLeft || !normalizedRight) return comparePoseFrames(null, null, regions);
+
+  let sum = 0;
+  let count = 0;
+  const regionTotals = new Map();
+  for (const id of ids) {
+    const leftPoint = normalizedLeft[id];
+    const rightPoint = normalizedRight[id];
+    if (!leftPoint || !rightPoint) continue;
+    const distance = Math.hypot(leftPoint.x - rightPoint.x, leftPoint.y - rightPoint.y);
+    sum += distance;
+    count += 1;
+    const region = regionForLandmark(id);
+    const current = regionTotals.get(region) || { distance: 0, count: 0 };
+    current.distance += distance;
+    current.count += 1;
+    regionTotals.set(region, current);
+  }
+
+  if (!count) return comparePoseFrames(null, null, regions);
+
+  const averageDistance = sum / count;
+  const score = Math.max(0, Math.min(100, Math.round(100 - averageDistance * 145)));
+  const rows = Array.from(regionTotals.entries()).map(([region, value]) => {
+    const diff = Number((value.distance / value.count).toFixed(3));
+    return {
+      id: `overlay-${region}`,
+      title: regionTitle(region),
+      leftValue: "-",
+      rightValue: "-",
+      diff,
+      unit: "",
+      score: Math.max(0, Math.round(100 - diff * 145))
+    };
+  });
+  const worst = [...rows].sort((a, b) => b.diff - a.diff).slice(0, 3);
+  const suggestions = worst.map((row) => `${row.title}: средняя дистанция наложения ${row.diff}.`);
+
+  return {
+    ready: true,
+    score,
+    rows,
+    overlayDistance: Number(averageDistance.toFixed(4)),
+    suggestions,
+    verdict: overlayVerdict(score, suggestions)
+  };
+}
+
+function compareOverlayScans(leftScan, rightScan, sync, regions = defaultMediaPipeSettings.regions) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return compareOverlayFrames(null, null, regions);
+
+  const offset = sync?.ready ? sync.offsetSeconds : 0;
+  const usableFrames = synchronizedFramePairs(leftScan, rightScan, offset)
+    .map((pair) => ({ ...pair, comparison: compareOverlayFrames(pair.leftFrame, pair.rightFrame, regions) }))
+    .filter((pair) => pair.comparison.ready);
+
+  if (!usableFrames.length) return compareOverlayFrames(null, null, regions);
+  return aggregateComparisons(usableFrames, "overlay");
+}
+
+function compareImpulsePoseScans(leftScan, rightScan, sync, regions = defaultMediaPipeSettings.regions, leftAudio = null) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null, regions);
+
+  const offset = sync?.ready ? sync.offsetSeconds : 0;
+  const impulseTimes = impulseTimesForAnalysis(leftAudio, leftScan);
+  const usableFrames = impulseTimes
+    .map((time) => {
+      const leftFrame = nearestFrame(leftScan.frames, time);
+      const rightFrame = nearestFrame(rightScan.frames, time + offset);
+      if (!leftFrame?.landmarks?.length || !rightFrame?.landmarks?.length) return null;
+      const angles = comparePoseFrames(leftFrame, rightFrame, regions);
+      const overlay = compareOverlayFrames(leftFrame, rightFrame, regions);
+      const score = Math.round(angles.score * 0.58 + overlay.score * 0.42);
+      return {
+        leftTime: leftFrame.time,
+        rightTime: rightFrame.time,
+        impulseTime: time,
+        leftFrame,
+        rightFrame,
+        comparison: {
+          ready: true,
+          score,
+          rows: [
+            {
+              id: `pose-${time}-angles`,
+              title: `Импульс ${formatTime(time)}: углы`,
+              leftValue: angles.score,
+              rightValue: overlay.score,
+              diff: Math.abs(angles.score - overlay.score),
+              unit: "%",
+              score
+            }
+          ],
+          suggestions: [...angles.suggestions.slice(0, 1), ...overlay.suggestions.slice(0, 1)]
+        }
+      };
+    })
+    .filter(Boolean);
+
+  if (!usableFrames.length) return comparePoseFrames(null, null, regions);
+  const result = aggregateComparisons(usableFrames, "poses");
+  return {
+    ...result,
+    poseMoments: usableFrames.slice(0, 12).map((item) => ({
+      leftTime: item.leftTime,
+      rightTime: item.rightTime,
+      impulseTime: item.impulseTime,
+      score: item.comparison.score,
+      leftLandmarks: item.leftFrame.landmarks,
+      rightLandmarks: item.rightFrame.landmarks
+    })),
+    verdict: poseVerdict(result.score, result.suggestions)
+  };
+}
+
+function aggregateComparisons(usableFrames, model) {
+  const totals = new Map();
+  let scoreSum = 0;
+  let bestScore = -Infinity;
+  let worstScore = Infinity;
+  let worstMoment = null;
+
+  for (const item of usableFrames) {
+    const frameScore = item.comparison.score;
+    scoreSum += frameScore;
+    if (frameScore > bestScore) bestScore = frameScore;
+    if (frameScore < worstScore) {
+      worstScore = frameScore;
+      worstMoment = item;
+    }
+    for (const row of item.comparison.rows) {
+      const current = totals.get(row.id) || { ...row, diff: 0, leftValue: 0, rightValue: 0, count: 0 };
+      current.diff += Number(row.diff) || 0;
+      current.leftValue += Number(row.leftValue) || 0;
+      current.rightValue += Number(row.rightValue) || 0;
+      current.count += 1;
+      totals.set(row.id, current);
+    }
+  }
+
+  const rows = Array.from(totals.values()).map((row) => ({
+    ...row,
+    diff: Number((row.diff / row.count).toFixed(row.unit === "" ? 3 : 1)),
+    leftValue: Number.isFinite(row.leftValue) ? Number((row.leftValue / row.count).toFixed(1)) : "-",
+    rightValue: Number.isFinite(row.rightValue) ? Number((row.rightValue / row.count).toFixed(1)) : "-",
+    score: Math.max(0, Math.round(100 - (row.diff / row.count) * (row.unit === "" ? 145 : 2.15)))
+  }));
+
+  const score = Math.round(scoreSum / usableFrames.length);
+  const worst = [...rows].sort((a, b) => (b.diff || 0) - (a.diff || 0)).slice(0, 4);
+  const suggestions =
+    model === "overlay"
+      ? worst.map((row) => `${row.title}: средняя дистанция наложения ${row.diff}.`)
+      : worst.map((row) => `${row.title}: ключевой момент проседает до ${row.score}%.`);
+
+  return {
+    ready: true,
+    score,
+    rows,
+    suggestions,
+    framesCompared: usableFrames.length,
+    bestScore: Math.round(bestScore),
+    worstScore: Math.round(worstScore),
+    durationCompared: Number((usableFrames.at(-1).leftTime - usableFrames[0].leftTime).toFixed(1)),
+    worstMoment: worstMoment
+      ? {
+          leftTime: worstMoment.leftTime,
+          rightTime: worstMoment.rightTime,
+          score: worstMoment.comparison.score
+        }
+      : null,
+    verdict: model === "overlay" ? overlayVerdict(score, suggestions) : poseVerdict(score, suggestions)
+  };
+}
+
+function synchronizedFramePairs(leftScan, rightScan, offset) {
+  return leftScan.frames
+    .filter((frame) => frame.landmarks?.length)
+    .map((leftFrame) => {
+      const rightFrame = nearestFrame(rightScan.frames, leftFrame.time + offset);
+      if (!rightFrame?.landmarks?.length) return null;
+      return { leftFrame, rightFrame, leftTime: leftFrame.time, rightTime: rightFrame.time };
+    })
+    .filter(Boolean);
+}
+
+function overlayLandmarkIds(regions = defaultMediaPipeSettings.regions) {
+  const ids = new Set();
+  activeAngleSpecs(regions).forEach((spec) => spec.points.forEach((id) => ids.add(id)));
+  return Array.from(ids);
+}
+
+function normalizeSkeleton(landmarks) {
+  const center = averagePoint([landmarks[11], landmarks[12], landmarks[23], landmarks[24]].filter(Boolean));
+  if (!center) return null;
+  const scalePoints = [landmarks[11], landmarks[12], landmarks[23], landmarks[24], landmarks[25], landmarks[26]].filter(Boolean);
+  const scale =
+    scalePoints.reduce((sum, point) => sum + Math.hypot(point.x - center.x, point.y - center.y), 0) / Math.max(1, scalePoints.length) ||
+    0.1;
+  return landmarks.map((point) =>
+    point
+      ? {
+          ...point,
+          x: (point.x - center.x) / scale,
+          y: (point.y - center.y) / scale
+        }
+      : point
+  );
+}
+
+function regionForLandmark(id) {
+  if ([13, 14, 15, 16, 11, 12].includes(id)) return "arms";
+  if ([25, 26, 27, 28, 29, 30, 31, 32].includes(id)) return "legs";
+  return "torso";
+}
+
+function regionTitle(region) {
+  if (region === "arms") return "Наложение рук и плеч";
+  if (region === "legs") return "Наложение ног";
+  return "Наложение корпуса";
+}
+
+function impulseTimesForAnalysis(leftAudio, leftScan) {
+  const start = leftScan?.range?.start ?? 0;
+  const end = leftScan?.range?.end ?? leftScan?.duration ?? 0;
+  const peaks = (leftAudio?.peaks || [])
+    .filter((peak) => peak.time >= start && peak.time <= end)
+    .sort((a, b) => b.value - a.value);
+  const selected = [];
+  for (const peak of peaks) {
+    if (selected.every((time) => Math.abs(time - peak.time) > 0.45)) selected.push(peak.time);
+    if (selected.length >= 12) break;
+  }
+  if (selected.length) return selected.sort((a, b) => a - b);
+  const frames = leftScan?.frames?.filter((frame) => frame.landmarks?.length) || [];
+  const stride = Math.max(1, Math.floor(frames.length / 8));
+  return frames.filter((_, index) => index % stride === 0).slice(0, 8).map((frame) => frame.time);
+}
+
+function overlayVerdict(score, suggestions) {
+  if (score >= 86) return "Скелеты хорошо ложатся друг на друга после нормализации корпуса и масштаба.";
+  if (score >= 70) return `Наложение в целом стабильное, но заметны зоны расхождения: ${suggestions.slice(0, 2).join(" ")}`;
+  if (score >= 52) return `Скелеты совпадают частично. Главные смещения: ${suggestions.slice(0, 3).join(" ")}`;
+  return `Наложение показывает сильное расхождение пластики и формы движения: ${suggestions.slice(0, 3).join(" ")}`;
+}
+
+function poseVerdict(score, suggestions) {
+  if (score >= 86) return "Ключевые позы на музыкальных импульсах совпадают с эталоном очень близко.";
+  if (score >= 70) return `Ключевые позы в музыке в целом похожи, но есть акцентные расхождения: ${suggestions.slice(0, 2).join(" ")}`;
+  if (score >= 52) return `На музыкальных импульсах правое видео часто приходит в другую форму: ${suggestions.slice(0, 3).join(" ")}`;
+  return `Ключевые позы почти не совпадают с эталоном: ${suggestions.slice(0, 3).join(" ")}`;
 }
 
 function nearestFrame(frames, time) {
@@ -611,6 +907,13 @@ function formatTime(seconds) {
     .toString()
     .padStart(2, "0");
   return `${minutes}:${rest}`;
+}
+
+function formatMetricValue(value, unit) {
+  if (value === null || value === undefined || value === "-") return "-";
+  if (unit === "") return value;
+  if (unit === "%") return `${value}%`;
+  return `${value}°`;
 }
 
 const VideoPane = forwardRef(function VideoPane(
@@ -1214,6 +1517,28 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
   );
 }
 
+function ComparisonModelPanel({ model, onChange }) {
+  return (
+    <section className="comparison-model-panel">
+      <div className="settings-title">
+        <div>
+          <p className="eyebrow">Comparison Model</p>
+          <h2>Модель сравнения скелетов</h2>
+        </div>
+        <span className="status status-good">{comparisonModels[model].title}</span>
+      </div>
+      <div className="model-tabs">
+        {Object.entries(comparisonModels).map(([key, item]) => (
+          <button type="button" className={model === key ? "selected" : ""} onClick={() => onChange(key)} key={key}>
+            <strong>{item.shortTitle}</strong>
+            <span>{item.description}</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function serializeLandmarks(landmarks, landmarkSet = "core13") {
   const ids = landmarkSet === "full33" ? poseLandmarkCatalog.map((_, index) => index) : coreLandmarkIds;
   return ids
@@ -1431,8 +1756,173 @@ function drawWave(ctx, waveform, width, height, color, offsetSeconds) {
   ctx.stroke();
 }
 
+function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) {
+  const canvasRef = useRef(null);
+  const frameRef = useRef(0);
+  const pairs = useMemo(() => {
+    if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
+    return synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
+  }, [enabled, leftScan, rightScan, sync]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !pairs.length) return undefined;
+    const dpr = window.devicePixelRatio || 1;
+    let index = 0;
+
+    function draw() {
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+      canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      ctx.fillStyle = "#101827";
+      ctx.fillRect(0, 0, rect.width, rect.height);
+      drawSkeletonGrid(ctx, rect.width, rect.height);
+      const pair = pairs[index % pairs.length];
+      const left = normalizeSkeleton(pair.leftFrame.landmarks);
+      const right = normalizeSkeleton(pair.rightFrame.landmarks);
+      drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
+      drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 13px Inter, sans-serif";
+      ctx.fillText(`Эталон ${pair.leftTime.toFixed(1)}с / правое ${pair.rightTime.toFixed(1)}с`, 14, 24);
+      index += 1;
+      frameRef.current = requestAnimationFrame(draw);
+    }
+
+    draw();
+    return () => cancelAnimationFrame(frameRef.current);
+  }, [pairs, regions]);
+
+  return (
+    <section className={`skeleton-lab ${enabled ? "" : "hidden"}`}>
+      <div className="sync-header">
+        <div>
+          <p className="eyebrow">Overlay Lab</p>
+          <h2>Наложение скелет на скелет</h2>
+        </div>
+        <div className="legend">
+          <span>
+            <i className="skeleton-left" /> эталон
+          </span>
+          <span>
+            <i className="skeleton-right" /> правое видео
+          </span>
+        </div>
+      </div>
+      <canvas ref={canvasRef} className="skeleton-canvas" />
+      <p className="sync-note">
+        Здесь оба скелета центрируются по корпусу и приводятся к одному масштабу. Чем меньше расстояние между точками, тем выше оценка
+        наложения.
+      </p>
+    </section>
+  );
+}
+
+function KeyPoseViewer({ comparison, enabled, regions }) {
+  const moments = comparison?.poseMoments || [];
+  return (
+    <section className={`skeleton-lab ${enabled ? "" : "hidden"}`}>
+      <div className="sync-header">
+        <div>
+          <p className="eyebrow">Pose Impulses</p>
+          <h2>Ключевые позы на импульсах музыки</h2>
+        </div>
+        <span className="status">{moments.length ? `${moments.length} поз` : "ожидание анализа"}</span>
+      </div>
+      {moments.length ? (
+        <div className="pose-grid">
+          {moments.map((moment) => (
+            <PoseCard key={`${moment.leftTime}-${moment.rightTime}`} moment={moment} regions={regions} />
+          ))}
+        </div>
+      ) : (
+        <p className="empty-history">После полного анализа модель покажет позы на сильных музыкальных импульсах.</p>
+      )}
+    </section>
+  );
+}
+
+function PoseCard({ moment, regions }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = "#101827";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    drawSkeletonGrid(ctx, rect.width, rect.height);
+    drawNormalizedSkeleton(ctx, normalizeSkeleton(moment.leftLandmarks), rect.width, rect.height, "#28d7a4", regions);
+    drawNormalizedSkeleton(ctx, normalizeSkeleton(moment.rightLandmarks), rect.width, rect.height, "#55a4ff", regions);
+  }, [moment, regions]);
+
+  return (
+    <article className="pose-card">
+      <canvas ref={canvasRef} />
+      <strong>{moment.score}%</strong>
+      <span>Импульс {formatTime(moment.impulseTime)}</span>
+    </article>
+  );
+}
+
+function drawSkeletonGrid(ctx, width, height) {
+  ctx.strokeStyle = "rgba(216, 232, 250, 0.14)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i += 1) {
+    const x = (width / 4) * i;
+    const y = (height / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+}
+
+function drawNormalizedSkeleton(ctx, landmarks, width, height, color, regions) {
+  if (!landmarks?.length) return;
+  const ids = new Set(overlayLandmarkIds(regions));
+  const centerX = width / 2;
+  const centerY = height * 0.52;
+  const scale = Math.min(width, height) * 0.22;
+  const project = (point) => ({ x: centerX + point.x * scale, y: centerY + point.y * scale });
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+
+  for (const [a, b] of PoseLandmarker.POSE_CONNECTIONS) {
+    if (!ids.has(a) || !ids.has(b) || !landmarks[a] || !landmarks[b]) continue;
+    const pa = project(landmarks[a]);
+    const pb = project(landmarks[b]);
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+  }
+  for (const id of ids) {
+    if (!landmarks[id]) continue;
+    const point = project(landmarks[id]);
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 function App() {
   const [mediaPipeSettings, setMediaPipeSettings] = useState(() => loadMediaPipeSettings());
+  const [comparisonModel, setComparisonModel] = useState(() => {
+    const savedModel = localStorage.getItem(comparisonModelKey);
+    return comparisonModels[savedModel] ? savedModel : "angles";
+  });
   const { landmarker, scanLandmarker, error } = usePoseLandmarker(mediaPipeSettings);
   const leftVideoRef = useRef(null);
   const rightVideoRef = useRef(null);
@@ -1455,13 +1945,13 @@ function App() {
   const [expectedScore, setExpectedScore] = useState("");
   const [labHistory, setLabHistory] = useState(() => loadLabHistory());
   const activeSpecs = useMemo(() => activeAngleSpecs(mediaPipeSettings.regions), [mediaPipeSettings.regions]);
-  const liveComparison = useMemo(
-    () => comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions),
-    [leftPose, rightPose, mediaPipeSettings.regions]
-  );
+  const liveComparison = useMemo(() => {
+    if (comparisonModel === "overlay") return compareOverlayFrames(leftPose, rightPose, mediaPipeSettings.regions);
+    return comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions);
+  }, [comparisonModel, leftPose, rightPose, mediaPipeSettings.regions]);
   const scanComparison = useMemo(
-    () => compareScans(leftScan, rightScan, sync, mediaPipeSettings.regions),
-    [leftScan, rightScan, sync, mediaPipeSettings.regions]
+    () => compareByModel(comparisonModel, leftScan, rightScan, sync, mediaPipeSettings.regions, leftAudio),
+    [comparisonModel, leftScan, rightScan, sync, mediaPipeSettings.regions, leftAudio]
   );
   const comparison = runState.result || (leftScan?.frames?.length && rightScan?.frames?.length ? pendingFullRunComparison() : liveComparison);
   const confidence = Math.round(
@@ -1479,6 +1969,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(mediaPipeSettingsKey, JSON.stringify(mediaPipeSettings));
   }, [mediaPipeSettings]);
+
+  useEffect(() => {
+    localStorage.setItem(comparisonModelKey, comparisonModel);
+  }, [comparisonModel]);
 
   const nextMediaPipeTimestamp = useCallback(() => {
     const now = performance.now();
@@ -1569,7 +2063,7 @@ function App() {
     try {
       await Promise.all([leftVideoRef.current?.playAt(leftStart, false), rightVideoRef.current?.playAt(rightStart, false)]);
     } catch (err) {
-      const result = compareScans(leftScan, rightScan, activeSync, mediaPipeSettings.regions);
+      const result = compareByModel(comparisonModel, leftScan, rightScan, activeSync, mediaPipeSettings.regions, leftAudio);
       setRunState({
         status: "done",
         progress: 100,
@@ -1589,7 +2083,7 @@ function App() {
       if (elapsed >= playableSeconds - 0.05) {
         leftVideoRef.current?.pause();
         rightVideoRef.current?.pause();
-        const result = compareScans(leftScan, rightScan, activeSync, mediaPipeSettings.regions);
+        const result = compareByModel(comparisonModel, leftScan, rightScan, activeSync, mediaPipeSettings.regions, leftAudio);
         setRunState({
           status: "done",
           progress: 100,
@@ -1617,6 +2111,7 @@ function App() {
       rightFileName: rightFile?.name || "",
       expectedScore: expectedScore === "" ? null : Number(expectedScore),
       score: runState.result.score,
+      comparisonModel,
       mediaPipeSettings: {
         ...mediaPipeSettings,
         activeAngles: activeSpecs.map((spec) => ({
@@ -1679,6 +2174,19 @@ function App() {
           });
         }}
         isReady={Boolean(landmarker && scanLandmarker)}
+      />
+
+      <ComparisonModelPanel
+        model={comparisonModel}
+        onChange={(model) => {
+          setComparisonModel(model);
+          setRunState({
+            status: "idle",
+            progress: 0,
+            result: null,
+            message: `Выбрана модель "${comparisonModels[model].title}". Запустите полный анализ для расчета по этой логике.`
+          });
+        }}
       />
 
       {error && <div className="global-error">{error}</div>}
@@ -1781,6 +2289,16 @@ function App() {
         </div>
       </div>
 
+      <SkeletonOverlayViewer
+        leftScan={leftScan}
+        rightScan={rightScan}
+        sync={sync}
+        regions={mediaPipeSettings.regions}
+        enabled={comparisonModel === "overlay"}
+      />
+
+      <KeyPoseViewer comparison={comparison} enabled={comparisonModel === "poses"} regions={mediaPipeSettings.regions} />
+
       <section className="analysis-panel">
         <div className="score-ring" style={{ "--score": comparison.score }}>
           <div>
@@ -1820,9 +2338,9 @@ function App() {
             {(comparison.rows.length ? comparison.rows : activeSpecs).map((row) => (
               <div className="table-row" key={row.id}>
                 <span>{row.title}</span>
-                <span>{row.leftValue ?? "-"}°</span>
-                <span>{row.rightValue ?? "-"}°</span>
-                <span className={row.diff > 18 ? "bad" : row.diff > 9 ? "warn" : "good"}>{row.diff ?? "-"}°</span>
+                <span>{formatMetricValue(row.leftValue, row.unit)}</span>
+                <span>{formatMetricValue(row.rightValue, row.unit)}</span>
+                <span className={row.diff > 18 ? "bad" : row.diff > 9 ? "warn" : "good"}>{formatMetricValue(row.diff, row.unit)}</span>
               </div>
             ))}
           </div>
