@@ -970,6 +970,51 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
+function serializeLandmarks(landmarks) {
+  return (landmarks || []).map((point) => ({
+    x: Number(point.x.toFixed(5)),
+    y: Number(point.y.toFixed(5)),
+    z: Number((point.z || 0).toFixed(5)),
+    visibility: Number((point.visibility || 0).toFixed(3))
+  }));
+}
+
+function serializeScanSkeleton(scan) {
+  if (!scan?.frames?.length) return null;
+  return {
+    duration: scan.duration,
+    range: scan.range || null,
+    trackedFrames: scan.trackedFrames,
+    averageConfidence: Number((scan.averageConfidence || 0).toFixed(4)),
+    frames: scan.frames
+      .filter((frame) => frame.landmarks?.length)
+      .map((frame) => ({
+        time: frame.time,
+        confidence: Number((frame.confidence || 0).toFixed(4)),
+        angles: frame.angles,
+        landmarks: serializeLandmarks(frame.landmarks)
+      }))
+  };
+}
+
+function serializeSkeletonPairs(leftScan, rightScan, sync) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return [];
+  const offset = sync?.ready ? sync.offsetSeconds : 0;
+  return leftScan.frames
+    .filter((frame) => frame.landmarks?.length)
+    .map((leftFrame) => {
+      const rightFrame = nearestFrame(rightScan.frames, leftFrame.time + offset);
+      if (!rightFrame?.landmarks?.length) return null;
+      return {
+        leftTime: leftFrame.time,
+        rightTime: rightFrame.time,
+        leftLandmarks: serializeLandmarks(leftFrame.landmarks),
+        rightLandmarks: serializeLandmarks(rightFrame.landmarks)
+      };
+    })
+    .filter(Boolean);
+}
+
 function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave, onExport, onClear, canSave }) {
   return (
     <section className="lab-panel">
@@ -1014,6 +1059,11 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
               <span>{new Date(item.createdAt).toLocaleString()}</span>
               <p>
                 Эталон: {item.leftComment || "без комментария"} | Правое: {item.rightComment || "без комментария"}
+              </p>
+              <p>
+                Скелеты: {item.skeletons?.left?.frames?.length || 0} кадров эталона,{" "}
+                {item.skeletons?.right?.frames?.length || 0} кадров правого,{" "}
+                {item.skeletons?.synchronizedPairs?.length || 0} синхронных пар.
               </p>
             </article>
           ))
@@ -1299,6 +1349,11 @@ function App() {
         worstMoment: runState.result.worstMoment ?? null
       },
       angleRows: runState.result.rows,
+      skeletons: {
+        left: serializeScanSkeleton(leftScan),
+        right: serializeScanSkeleton(rightScan),
+        synchronizedPairs: serializeSkeletonPairs(leftScan, rightScan, sync)
+      },
       suggestions: runState.result.suggestions,
       verdict: runState.result.verdict
     };
