@@ -324,7 +324,7 @@ function waitForVideoEvent(video, eventName) {
   });
 }
 
-async function scanVideoPose(video, landmarker, onProgress) {
+async function scanVideoPose(video, landmarker, onProgress, nextTimestamp) {
   if (!video || !landmarker || !Number.isFinite(video.duration)) {
     throw new Error("Видео еще не готово для сканирования.");
   }
@@ -336,8 +336,6 @@ async function scanVideoPose(video, landmarker, onProgress) {
   const duration = video.duration;
   const step = duration > 90 ? 0.33 : 0.2;
   const frames = [];
-  const timestampBase = performance.now();
-  let frameIndex = 0;
 
   for (let time = 0; time <= duration; time += step) {
     const targetTime = Math.min(time, Math.max(0, duration - 0.02));
@@ -345,7 +343,7 @@ async function scanVideoPose(video, landmarker, onProgress) {
       video.currentTime = targetTime;
       await waitForVideoEvent(video, "seeked");
     }
-    const result = landmarker.detectForVideo(video, timestampBase + frameIndex * 34);
+    const result = landmarker.detectForVideo(video, nextTimestamp());
     const landmarks = result.landmarks?.[0] || [];
     frames.push({
       time: Number(video.currentTime.toFixed(3)),
@@ -353,7 +351,6 @@ async function scanVideoPose(video, landmarker, onProgress) {
       angles: poseAngles(landmarks),
       confidence: landmarks.length ? averageVisibility(landmarks) : 0
     });
-    frameIndex += 1;
     onProgress?.(Math.min(100, Math.round((time / duration) * 100)));
   }
 
@@ -490,7 +487,7 @@ function zNormalize(values) {
 }
 
 const VideoPane = forwardRef(function VideoPane(
-  { title, roleLabel, side, landmarker, onPose, onFile, onScanComplete, scan, active },
+  { title, roleLabel, side, landmarker, nextTimestamp, onPose, onFile, onScanComplete, scan, active },
   ref
 ) {
   const videoRef = useRef(null);
@@ -555,7 +552,7 @@ const VideoPane = forwardRef(function VideoPane(
     }
 
     if (lastVideoTimeRef.current !== video.currentTime) {
-      const result = landmarker.detectForVideo(video, performance.now());
+      const result = landmarker.detectForVideo(video, nextTimestamp());
       const landmarks = result.landmarks?.[0] || [];
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -678,7 +675,7 @@ const VideoPane = forwardRef(function VideoPane(
     isScanningRef.current = true;
     setScanProgress(1);
     try {
-      const result = await scanVideoPose(video, landmarker, setScanProgress);
+      const result = await scanVideoPose(video, landmarker, setScanProgress, nextTimestamp);
       onScanComplete(result);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -888,6 +885,7 @@ function App() {
   const leftVideoRef = useRef(null);
   const rightVideoRef = useRef(null);
   const analysisRafRef = useRef(0);
+  const mediaPipeTimestampRef = useRef(0);
   const [leftPose, setLeftPose] = useState(null);
   const [rightPose, setRightPose] = useState(null);
   const [leftFile, setLeftFile] = useState(null);
@@ -909,6 +907,13 @@ function App() {
   );
 
   useEffect(() => () => cancelAnimationFrame(analysisRafRef.current), []);
+
+  const nextMediaPipeTimestamp = useCallback(() => {
+    const now = performance.now();
+    const next = Math.max(now, mediaPipeTimestampRef.current + 1);
+    mediaPipeTimestampRef.current = next;
+    return next;
+  }, []);
 
   async function handleAudio(side, file) {
     setSync({ ready: false, offsetSeconds: 0, confidence: 0 });
@@ -1036,6 +1041,7 @@ function App() {
           roleLabel="Сканируем и сохраняем позу как базовый образец"
           side="left"
           landmarker={landmarker}
+          nextTimestamp={nextMediaPipeTimestamp}
           onPose={setLeftPose}
           onFile={(file) => {
             setLeftFile(file);
@@ -1055,6 +1061,7 @@ function App() {
           roleLabel="Это видео сравнивается с эталоном по музыке и позе"
           side="right"
           landmarker={landmarker}
+          nextTimestamp={nextMediaPipeTimestamp}
           onPose={setRightPose}
           onFile={(file) => {
             setRightFile(file);
