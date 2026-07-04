@@ -15,6 +15,7 @@ import "./styles.css";
 const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
 const modelUrl =
   "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+const labHistoryKey = "dmpa.lab.history.v1";
 
 const landmarkNames = {
   0: "нос",
@@ -527,6 +528,8 @@ const VideoPane = forwardRef(function VideoPane(
     onScanComplete,
     scan,
     active,
+    comment,
+    onCommentChange,
     analysisRange,
     onAnalysisRangeChange,
     showAnalysisRange = false
@@ -923,6 +926,18 @@ const VideoPane = forwardRef(function VideoPane(
         <span>Данные позы: {scan?.frames?.length ? `${scan.frames.length} точек таймлайна` : "не сохранены"}</span>
         <span>Точность: {scan?.averageConfidence ? `${Math.round(scan.averageConfidence * 100)}%` : "-"}</span>
       </div>
+      <label className="video-comment">
+        Комментарий для датасета
+        <textarea
+          value={comment}
+          onChange={(event) => onCommentChange(event.target.value)}
+          placeholder={
+            side === "left"
+              ? "Например: танец 1, эталон, оригинальная хореография"
+              : "Например: танец 1 дубль 2, тот же танец / танец 2, другой стиль"
+          }
+        />
+      </label>
       {error && <p className="pane-error">{error}</p>}
     </section>
   );
@@ -934,6 +949,79 @@ function MetricCard({ label, value }) {
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
+  );
+}
+
+function loadLabHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(labHistoryKey) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function downloadJson(filename, data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave, onExport, onClear, canSave }) {
+  return (
+    <section className="lab-panel">
+      <div className="lab-header">
+        <div>
+          <p className="eyebrow">Algorithm Lab</p>
+          <h2>История обучающих примеров</h2>
+        </div>
+        <span>{history.length} записей</span>
+      </div>
+
+      <div className="lab-controls">
+        <label>
+          Ожидаемая схожесть, %
+          <input
+            type="number"
+            min="0"
+            max="100"
+            value={expectedScore}
+            onChange={(event) => onExpectedScoreChange(event.target.value)}
+            placeholder="например 0 или 100"
+          />
+        </label>
+        <button type="button" onClick={onSave} disabled={!canSave}>
+          Сохранить пример
+        </button>
+        <button type="button" onClick={onExport} disabled={!history.length}>
+          Экспорт JSON
+        </button>
+        <button type="button" onClick={onClear} disabled={!history.length}>
+          Очистить историю
+        </button>
+      </div>
+
+      <div className="history-list">
+        {history.length ? (
+          history.slice(0, 8).map((item) => (
+            <article key={item.id} className="history-item">
+              <strong>
+                {item.score}% схожесть{item.expectedScore !== null ? ` / ожидалось ${item.expectedScore}%` : ""}
+              </strong>
+              <span>{new Date(item.createdAt).toLocaleString()}</span>
+              <p>
+                Эталон: {item.leftComment || "без комментария"} | Правое: {item.rightComment || "без комментария"}
+              </p>
+            </article>
+          ))
+        ) : (
+          <p className="empty-history">После полного анализа сохраняйте примеры, чтобы собрать датасет для настройки алгоритма.</p>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1049,6 +1137,8 @@ function App() {
   const [rightPose, setRightPose] = useState(null);
   const [leftFile, setLeftFile] = useState(null);
   const [rightFile, setRightFile] = useState(null);
+  const [leftComment, setLeftComment] = useState("");
+  const [rightComment, setRightComment] = useState("");
   const [leftScan, setLeftScan] = useState(null);
   const [rightScan, setRightScan] = useState(null);
   const [leftAudio, setLeftAudio] = useState(null);
@@ -1057,6 +1147,8 @@ function App() {
   const [sync, setSync] = useState({ ready: false, offsetSeconds: 0, confidence: 0 });
   const [audioStatus, setAudioStatus] = useState("");
   const [runState, setRunState] = useState({ status: "idle", progress: 0, result: null, message: "" });
+  const [expectedScore, setExpectedScore] = useState("");
+  const [labHistory, setLabHistory] = useState(() => loadLabHistory());
   const liveComparison = useMemo(() => comparePoseFrames(leftPose, rightPose), [leftPose, rightPose]);
   const scanComparison = useMemo(() => compareScans(leftScan, rightScan, sync), [leftScan, rightScan, sync]);
   const comparison = runState.result || (leftScan?.frames?.length && rightScan?.frames?.length ? pendingFullRunComparison() : liveComparison);
@@ -1067,6 +1159,10 @@ function App() {
   );
 
   useEffect(() => () => cancelAnimationFrame(analysisRafRef.current), []);
+
+  useEffect(() => {
+    localStorage.setItem(labHistoryKey, JSON.stringify(labHistory));
+  }, [labHistory]);
 
   const nextMediaPipeTimestamp = useCallback(() => {
     const now = performance.now();
@@ -1182,6 +1278,37 @@ function App() {
     analysisRafRef.current = requestAnimationFrame(tick);
   }
 
+  function saveLabExample() {
+    if (!runState.result?.ready) return;
+    const nextItem = {
+      id: crypto.randomUUID(),
+      createdAt: new Date().toISOString(),
+      leftComment,
+      rightComment,
+      leftFileName: leftFile?.name || "",
+      rightFileName: rightFile?.name || "",
+      expectedScore: expectedScore === "" ? null : Number(expectedScore),
+      score: runState.result.score,
+      sync,
+      leftAnalysisRange,
+      metrics: {
+        framesCompared: runState.result.framesCompared || 0,
+        bestScore: runState.result.bestScore ?? null,
+        worstScore: runState.result.worstScore ?? null,
+        durationCompared: runState.result.durationCompared ?? null,
+        worstMoment: runState.result.worstMoment ?? null
+      },
+      angleRows: runState.result.rows,
+      suggestions: runState.result.suggestions,
+      verdict: runState.result.verdict
+    };
+    setLabHistory((items) => [nextItem, ...items]);
+  }
+
+  function clearLabHistory() {
+    setLabHistory([]);
+  }
+
   return (
     <main className="app">
       <header className="topbar">
@@ -1220,6 +1347,8 @@ function App() {
           }}
           scan={leftScan}
           active={Boolean(leftPose?.landmarks?.length)}
+          comment={leftComment}
+          onCommentChange={setLeftComment}
           showAnalysisRange
           analysisRange={leftAnalysisRange}
           onAnalysisRangeChange={(range) => {
@@ -1251,6 +1380,8 @@ function App() {
           }}
           scan={rightScan}
           active={Boolean(rightPose?.landmarks?.length)}
+          comment={rightComment}
+          onCommentChange={setRightComment}
         />
       </section>
 
@@ -1346,6 +1477,16 @@ function App() {
           </div>
         </div>
       </section>
+
+      <LabHistoryPanel
+        history={labHistory}
+        expectedScore={expectedScore}
+        onExpectedScoreChange={setExpectedScore}
+        onSave={saveLabExample}
+        onExport={() => downloadJson("dmpa-lab-history.json", labHistory)}
+        onClear={clearLabHistory}
+        canSave={Boolean(runState.result?.ready)}
+      />
     </main>
   );
 }
