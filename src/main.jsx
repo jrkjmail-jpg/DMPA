@@ -267,6 +267,7 @@ function pendingFullRunComparison() {
 
 function usePoseLandmarker() {
   const [landmarker, setLandmarker] = useState(null);
+  const [scanLandmarker, setScanLandmarker] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -285,7 +286,21 @@ function usePoseLandmarker() {
           minPosePresenceConfidence: 0.45,
           minTrackingConfidence: 0.45
         });
-        if (!cancelled) setLandmarker(detector);
+        const scanDetector = await PoseLandmarker.createFromOptions(fileset, {
+          baseOptions: {
+            modelAssetPath: modelUrl,
+            delegate: "GPU"
+          },
+          runningMode: "IMAGE",
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.45,
+          minPosePresenceConfidence: 0.45,
+          minTrackingConfidence: 0.45
+        });
+        if (!cancelled) {
+          setLandmarker(detector);
+          setScanLandmarker(scanDetector);
+        }
       } catch (err) {
         setError("Не удалось загрузить MediaPipe. Проверьте интернет или CDN-доступ.");
         console.error(err);
@@ -297,7 +312,7 @@ function usePoseLandmarker() {
     };
   }, []);
 
-  return { landmarker, error };
+  return { landmarker, scanLandmarker, error };
 }
 
 function waitForVideoEvent(video, eventName) {
@@ -324,8 +339,8 @@ function waitForVideoEvent(video, eventName) {
   });
 }
 
-async function scanVideoPose(video, landmarker, onProgress, nextTimestamp) {
-  if (!video || !landmarker || !Number.isFinite(video.duration)) {
+async function scanVideoPose(video, scanLandmarker, onProgress) {
+  if (!video || !scanLandmarker || !Number.isFinite(video.duration)) {
     throw new Error("Видео еще не готово для сканирования.");
   }
 
@@ -343,7 +358,7 @@ async function scanVideoPose(video, landmarker, onProgress, nextTimestamp) {
       video.currentTime = targetTime;
       await waitForVideoEvent(video, "seeked");
     }
-    const result = landmarker.detectForVideo(video, nextTimestamp());
+    const result = scanLandmarker.detect(video);
     const landmarks = result.landmarks?.[0] || [];
     frames.push({
       time: Number(video.currentTime.toFixed(3)),
@@ -487,7 +502,7 @@ function zNormalize(values) {
 }
 
 const VideoPane = forwardRef(function VideoPane(
-  { title, roleLabel, side, landmarker, nextTimestamp, onPose, onFile, onScanComplete, scan, active },
+  { title, roleLabel, side, landmarker, scanLandmarker, nextTimestamp, onPose, onFile, onScanComplete, scan, active },
   ref
 ) {
   const videoRef = useRef(null);
@@ -666,7 +681,7 @@ const VideoPane = forwardRef(function VideoPane(
       setError("Сначала загрузите видео.");
       return;
     }
-    if (!landmarker) {
+    if (!scanLandmarker) {
       setError("MediaPipe еще загружается.");
       return;
     }
@@ -675,7 +690,7 @@ const VideoPane = forwardRef(function VideoPane(
     isScanningRef.current = true;
     setScanProgress(1);
     try {
-      const result = await scanVideoPose(video, landmarker, setScanProgress, nextTimestamp);
+      const result = await scanVideoPose(video, scanLandmarker, setScanProgress);
       onScanComplete(result);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -881,7 +896,7 @@ function drawWave(ctx, waveform, width, height, color, offsetSeconds) {
 }
 
 function App() {
-  const { landmarker, error } = usePoseLandmarker();
+  const { landmarker, scanLandmarker, error } = usePoseLandmarker();
   const leftVideoRef = useRef(null);
   const rightVideoRef = useRef(null);
   const analysisRafRef = useRef(0);
@@ -1041,6 +1056,7 @@ function App() {
           roleLabel="Сканируем и сохраняем позу как базовый образец"
           side="left"
           landmarker={landmarker}
+          scanLandmarker={scanLandmarker}
           nextTimestamp={nextMediaPipeTimestamp}
           onPose={setLeftPose}
           onFile={(file) => {
@@ -1061,6 +1077,7 @@ function App() {
           roleLabel="Это видео сравнивается с эталоном по музыке и позе"
           side="right"
           landmarker={landmarker}
+          scanLandmarker={scanLandmarker}
           nextTimestamp={nextMediaPipeTimestamp}
           onPose={setRightPose}
           onFile={(file) => {
