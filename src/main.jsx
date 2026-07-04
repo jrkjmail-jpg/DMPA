@@ -659,13 +659,23 @@ const VideoPane = forwardRef(function VideoPane(
 
   useImperativeHandle(ref, () => ({
     video: videoRef.current,
-    playAt(time, withSound = false) {
+    async playAt(time, withSound = false) {
       const video = videoRef.current;
-      if (!video) return;
+      if (!video) return false;
       video.currentTime = Math.max(0, Math.min(time, video.duration || time));
       video.muted = !withSound;
       video.loop = false;
-      video.play();
+      try {
+        await video.play();
+        return true;
+      } catch (err) {
+        if (withSound) {
+          video.muted = true;
+          await video.play();
+          return true;
+        }
+        throw err;
+      }
     },
     pause() {
       videoRef.current?.pause();
@@ -1511,7 +1521,7 @@ function App() {
     }
   }
 
-  function playSynchronizedAnalysis(syncOverride = sync) {
+  async function playSynchronizedAnalysis(syncOverride = sync) {
     if (!leftScan?.frames?.length || !rightScan?.frames?.length) {
       setRunState({
         status: "error",
@@ -1556,8 +1566,20 @@ function App() {
     });
     leftVideoRef.current?.setLoop(false);
     rightVideoRef.current?.setLoop(false);
-    leftVideoRef.current?.playAt(leftStart, true);
-    rightVideoRef.current?.playAt(rightStart, true);
+    try {
+      await Promise.all([leftVideoRef.current?.playAt(leftStart, false), rightVideoRef.current?.playAt(rightStart, false)]);
+    } catch (err) {
+      const result = compareScans(leftScan, rightScan, activeSync, mediaPipeSettings.regions);
+      setRunState({
+        status: "done",
+        progress: 100,
+        result,
+        message:
+          "Мобильный браузер заблокировал воспроизведение, поэтому статистика рассчитана сразу по сохраненным сканам без видеопрогона."
+      });
+      console.error(err);
+      return;
+    }
 
     const tick = () => {
       const currentLeft = leftVideoRef.current?.video?.currentTime ?? leftStart;
@@ -1733,7 +1755,7 @@ function App() {
         <button
           type="button"
           onClick={() => playSynchronizedAnalysis()}
-          disabled={!leftFile || !rightFile || runState.status === "running"}
+          disabled={!leftScan?.frames?.length || !rightScan?.frames?.length || runState.status === "running"}
         >
           <Play size={18} />
           {runState.status === "running" ? `Анализ ${runState.progress}%` : "Повторить анализ всего видео"}
