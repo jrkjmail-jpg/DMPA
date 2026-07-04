@@ -541,6 +541,7 @@ const VideoPane = forwardRef(function VideoPane(
   const [sourceName, setSourceName] = useState("Источник не выбран");
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState("empty");
+  const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState("");
   const [scanProgress, setScanProgress] = useState(0);
@@ -717,6 +718,14 @@ const VideoPane = forwardRef(function VideoPane(
     if (video && mode === "file") video.currentTime = 0;
   }
 
+  function seekVideo(event) {
+    const video = videoRef.current;
+    if (!video) return;
+    const nextTime = Number(event.target.value);
+    video.currentTime = nextTime;
+    setCurrentTime(nextTime);
+  }
+
   async function scanSkeleton() {
     const video = videoRef.current;
     if (!video || mode === "empty") {
@@ -788,6 +797,7 @@ const VideoPane = forwardRef(function VideoPane(
           playsInline
           muted
           onLoadedMetadata={handleLoadedMetadata}
+          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
           onPlay={() => setIsPlaying(true)}
           onPause={() => setIsPlaying(false)}
         />
@@ -799,6 +809,16 @@ const VideoPane = forwardRef(function VideoPane(
           </div>
         )}
       </div>
+
+      {duration > 0 && (
+        <div className="playback-timeline">
+          <div className="time-row">
+            <span>{formatTime(currentTime)}</span>
+            <span>{formatTime(duration)}</span>
+          </div>
+          <input type="range" min="0" max={duration} step="0.05" value={currentTime} onChange={seekVideo} />
+        </div>
+      )}
 
       {showAnalysisRange && duration > 0 && analysisRange && (
         <div className="analysis-range">

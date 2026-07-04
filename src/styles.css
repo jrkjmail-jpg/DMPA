@@ -256,6 +256,28 @@ h3 {
   pointer-events: none;
 }
 
+.playback-timeline {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  margin: -4px 0 16px;
+  padding: 10px 12px;
+}
+
+.time-row {
+  color: #52677c;
+  display: flex;
+  font-size: 13px;
+  font-weight: 800;
+  justify-content: space-between;
+}
+
+.playback-timeline input[type="range"] {
+  display: block;
+  width: 100%;
+}
+
 .analysis-range {
   border: 1px solid #dbe4ef;
   border-radius: 8px;
