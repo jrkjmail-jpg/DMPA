@@ -339,7 +339,7 @@ function waitForVideoEvent(video, eventName) {
   });
 }
 
-async function scanVideoPose(video, scanLandmarker, onProgress) {
+async function scanVideoPose(video, scanLandmarker, onProgress, range = null) {
   if (!video || !scanLandmarker || !Number.isFinite(video.duration)) {
     throw new Error("Видео еще не готово для сканирования.");
   }
@@ -349,10 +349,13 @@ async function scanVideoPose(video, scanLandmarker, onProgress) {
   video.pause();
 
   const duration = video.duration;
-  const step = duration > 90 ? 0.33 : 0.2;
+  const scanStart = Math.max(0, Math.min(range?.start ?? 0, duration));
+  const scanEnd = Math.max(scanStart, Math.min(range?.end ?? duration, duration));
+  const scanDuration = Math.max(0.01, scanEnd - scanStart);
+  const step = scanDuration > 90 ? 0.33 : 0.2;
   const frames = [];
 
-  for (let time = 0; time <= duration; time += step) {
+  for (let time = scanStart; time <= scanEnd; time += step) {
     const targetTime = Math.min(time, Math.max(0, duration - 0.02));
     if (Math.abs(video.currentTime - targetTime) > 0.01) {
       video.currentTime = targetTime;
@@ -366,7 +369,7 @@ async function scanVideoPose(video, scanLandmarker, onProgress) {
       angles: poseAngles(landmarks),
       confidence: landmarks.length ? averageVisibility(landmarks) : 0
     });
-    onProgress?.(Math.min(100, Math.round((time / duration) * 100)));
+    onProgress?.(Math.min(100, Math.round(((time - scanStart) / scanDuration) * 100)));
   }
 
   video.currentTime = previousTime;
@@ -376,6 +379,7 @@ async function scanVideoPose(video, scanLandmarker, onProgress) {
   const trackedFrames = frames.filter((frame) => frame.landmarks.length);
   return {
     duration,
+    range: { start: scanStart, end: scanEnd },
     frames,
     trackedFrames: trackedFrames.length,
     averageConfidence: trackedFrames.length
@@ -501,8 +505,32 @@ function zNormalize(values) {
   return values.map((value) => (value - mean) / std);
 }
 
+function formatTime(seconds) {
+  const safeSeconds = Math.max(0, seconds || 0);
+  const minutes = Math.floor(safeSeconds / 60);
+  const rest = Math.floor(safeSeconds % 60)
+    .toString()
+    .padStart(2, "0");
+  return `${minutes}:${rest}`;
+}
+
 const VideoPane = forwardRef(function VideoPane(
-  { title, roleLabel, side, landmarker, scanLandmarker, nextTimestamp, onPose, onFile, onScanComplete, scan, active },
+  {
+    title,
+    roleLabel,
+    side,
+    landmarker,
+    scanLandmarker,
+    nextTimestamp,
+    onPose,
+    onFile,
+    onScanComplete,
+    scan,
+    active,
+    analysisRange,
+    onAnalysisRangeChange,
+    showAnalysisRange = false
+  },
   ref
 ) {
   const videoRef = useRef(null);
@@ -513,6 +541,7 @@ const VideoPane = forwardRef(function VideoPane(
   const [sourceName, setSourceName] = useState("Источник не выбран");
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState("empty");
+  const [duration, setDuration] = useState(0);
   const [error, setError] = useState("");
   const [scanProgress, setScanProgress] = useState(0);
   const [isScanning, setIsScanning] = useState(false);
@@ -571,8 +600,12 @@ const VideoPane = forwardRef(function VideoPane(
       const landmarks = result.landmarks?.[0] || [];
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const isInsideAnalysisRange =
+        !showAnalysisRange ||
+        !analysisRange ||
+        (video.currentTime >= analysisRange.start && video.currentTime <= analysisRange.end);
 
-      if (landmarks.length) {
+      if (landmarks.length && isInsideAnalysisRange) {
         const rect = containRect(canvas.width, canvas.height, video.videoWidth, video.videoHeight);
         const projectedLandmarks = projectLandmarksToCanvas(landmarks, rect, canvas.width, canvas.height);
         const visualScale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
@@ -589,16 +622,16 @@ const VideoPane = forwardRef(function VideoPane(
       }
 
       onPose({
-        landmarks,
-        angles: poseAngles(landmarks),
+        landmarks: isInsideAnalysisRange ? landmarks : [],
+        angles: isInsideAnalysisRange ? poseAngles(landmarks) : {},
         timestamp: video.currentTime,
-        confidence: landmarks.length ? averageVisibility(landmarks) : 0
+        confidence: landmarks.length && isInsideAnalysisRange ? averageVisibility(landmarks) : 0
       });
       lastVideoTimeRef.current = video.currentTime;
     }
 
     rafRef.current = requestAnimationFrame(analyzeFrame);
-  }, [landmarker, onPose, side]);
+  }, [analysisRange, landmarker, onPose, showAnalysisRange, side]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(analyzeFrame);
@@ -658,6 +691,15 @@ const VideoPane = forwardRef(function VideoPane(
     onScanComplete(null);
   }
 
+  function handleLoadedMetadata() {
+    const video = videoRef.current;
+    const nextDuration = video?.duration || 0;
+    setDuration(nextDuration);
+    if (showAnalysisRange && nextDuration && onAnalysisRangeChange) {
+      onAnalysisRangeChange({ start: 0, end: Number(nextDuration.toFixed(2)) });
+    }
+  }
+
   function togglePlay() {
     const video = videoRef.current;
     if (!video?.src && !video?.srcObject) return;
@@ -690,7 +732,7 @@ const VideoPane = forwardRef(function VideoPane(
     isScanningRef.current = true;
     setScanProgress(1);
     try {
-      const result = await scanVideoPose(video, scanLandmarker, setScanProgress);
+      const result = await scanVideoPose(video, scanLandmarker, setScanProgress, showAnalysisRange ? analysisRange : null);
       onScanComplete(result);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -741,7 +783,14 @@ const VideoPane = forwardRef(function VideoPane(
       )}
 
       <div className="stage">
-        <video ref={videoRef} playsInline muted onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} />
+        <video
+          ref={videoRef}
+          playsInline
+          muted
+          onLoadedMetadata={handleLoadedMetadata}
+          onPlay={() => setIsPlaying(true)}
+          onPause={() => setIsPlaying(false)}
+        />
         <canvas ref={canvasRef} />
         {mode === "empty" && (
           <div className="empty-state">
@@ -750,6 +799,81 @@ const VideoPane = forwardRef(function VideoPane(
           </div>
         )}
       </div>
+
+      {showAnalysisRange && duration > 0 && analysisRange && (
+        <div className="analysis-range">
+          <div className="range-header">
+            <strong>Диапазон анализа скелета</strong>
+            <span>
+              {formatTime(analysisRange.start)} - {formatTime(analysisRange.end)}
+            </span>
+          </div>
+          <div className="range-track">
+            <i
+              style={{
+                left: `${(analysisRange.start / duration) * 100}%`,
+                width: `${Math.max(0, ((analysisRange.end - analysisRange.start) / duration) * 100)}%`
+              }}
+            />
+          </div>
+          <label>
+            Начало
+            <input
+              type="range"
+              min="0"
+              max={duration}
+              step="0.1"
+              value={analysisRange.start}
+              onChange={(event) =>
+                onAnalysisRangeChange({
+                  start: Math.min(Number(event.target.value), analysisRange.end - 0.1),
+                  end: analysisRange.end
+                })
+              }
+            />
+          </label>
+          <label>
+            Конец
+            <input
+              type="range"
+              min="0"
+              max={duration}
+              step="0.1"
+              value={analysisRange.end}
+              onChange={(event) =>
+                onAnalysisRangeChange({
+                  start: analysisRange.start,
+                  end: Math.max(Number(event.target.value), analysisRange.start + 0.1)
+                })
+              }
+            />
+          </label>
+          <div className="range-actions">
+            <button
+              type="button"
+              onClick={() =>
+                onAnalysisRangeChange({
+                  start: Math.min(videoRef.current?.currentTime || 0, analysisRange.end - 0.1),
+                  end: analysisRange.end
+                })
+              }
+            >
+              Начало = текущий кадр
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                onAnalysisRangeChange({
+                  start: analysisRange.start,
+                  end: Math.max(videoRef.current?.currentTime || duration, analysisRange.start + 0.1)
+                })
+              }
+            >
+              Конец = текущий кадр
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="controls">
         <label className="button">
@@ -909,6 +1033,7 @@ function App() {
   const [rightScan, setRightScan] = useState(null);
   const [leftAudio, setLeftAudio] = useState(null);
   const [rightAudio, setRightAudio] = useState(null);
+  const [leftAnalysisRange, setLeftAnalysisRange] = useState({ start: 0, end: 0 });
   const [sync, setSync] = useState({ ready: false, offsetSeconds: 0, confidence: 0 });
   const [audioStatus, setAudioStatus] = useState("");
   const [runState, setRunState] = useState({ status: "idle", progress: 0, result: null, message: "" });
@@ -977,12 +1102,16 @@ function App() {
 
     const activeSync = syncOverride?.ready ? syncOverride : sync;
     const offset = activeSync.ready ? activeSync.offsetSeconds : 0;
-    const leftStart = Math.max(0, -offset);
-    const rightStart = Math.max(0, offset);
+    let leftStart = leftScan.frames?.[0]?.time ?? Math.max(0, -offset);
+    let rightStart = leftStart + offset;
+    if (rightStart < 0) {
+      leftStart = Math.min(leftScan.frames?.at(-1)?.time ?? leftStart, leftStart - rightStart);
+      rightStart = 0;
+    }
     const leftVideo = leftVideoRef.current?.video;
     const rightVideo = rightVideoRef.current?.video;
     const playableSeconds = Math.min(
-      Math.max(0, (leftVideo?.duration || leftScan.duration || 0) - leftStart),
+      Math.max(0, (leftScan.frames?.at(-1)?.time ?? leftVideo?.duration ?? leftScan.duration ?? 0) - leftStart),
       Math.max(0, (rightVideo?.duration || rightScan.duration || 0) - rightStart)
     );
 
@@ -1062,6 +1191,7 @@ function App() {
           onFile={(file) => {
             setLeftFile(file);
             setLeftScan(null);
+            setLeftAnalysisRange({ start: 0, end: 0 });
             handleAudio("left", file);
           }}
           onScanComplete={(scan) => {
@@ -1070,6 +1200,16 @@ function App() {
           }}
           scan={leftScan}
           active={Boolean(leftPose?.landmarks?.length)}
+          showAnalysisRange
+          analysisRange={leftAnalysisRange}
+          onAnalysisRangeChange={(range) => {
+            setLeftAnalysisRange({
+              start: Number(Math.max(0, range.start).toFixed(2)),
+              end: Number(Math.max(0, range.end).toFixed(2))
+            });
+            setLeftScan(null);
+            setRunState({ status: "idle", progress: 0, result: null, message: "" });
+          }}
         />
         <VideoPane
           ref={rightVideoRef}

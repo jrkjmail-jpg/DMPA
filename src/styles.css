@@ -256,6 +256,63 @@ h3 {
   pointer-events: none;
 }
 
+.analysis-range {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  margin: -4px 0 16px;
+  padding: 12px;
+}
+
+.range-header,
+.range-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.range-header span {
+  color: #52677c;
+  font-weight: 800;
+}
+
+.range-track {
+  background: #e8eef6;
+  border-radius: 999px;
+  height: 10px;
+  overflow: hidden;
+  position: relative;
+}
+
+.range-track i {
+  background: #28d7a4;
+  border-radius: 999px;
+  display: block;
+  height: 100%;
+  position: absolute;
+}
+
+.analysis-range label {
+  color: #52677c;
+  display: grid;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 5px;
+}
+
+.analysis-range input[type="range"] {
+  display: block;
+  width: 100%;
+}
+
+.range-actions button {
+  flex: 1;
+  min-height: 36px;
+  padding: 8px 10px;
+}
+
 .empty-state {
   align-items: center;
   color: #d8e8fa;
@@ -595,6 +652,12 @@ h3 {
 
   .source-toolbar span {
     text-align: left;
+  }
+
+  .range-header,
+  .range-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .camera-permission,
