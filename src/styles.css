@@ -56,7 +56,8 @@ input[type="file"] {
 }
 
 textarea,
-input[type="number"] {
+input[type="number"],
+select {
   border: 1px solid #d7e0eb;
   border-radius: 8px;
   color: #17202a;
@@ -65,7 +66,8 @@ input[type="number"] {
 }
 
 textarea:focus,
-input[type="number"]:focus {
+input[type="number"]:focus,
+select:focus {
   border-color: #7da4cf;
   outline: none;
 }
@@ -216,6 +218,90 @@ h3 {
   background: #e8fff7;
   border-color: #a6ead7;
   color: #08795e;
+}
+
+.settings-panel {
+  background: #ffffff;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 16px;
+  margin: -6px 0 18px;
+  padding: 16px;
+}
+
+.settings-title {
+  align-items: center;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.settings-grid label {
+  color: #52677c;
+  display: grid;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 7px;
+}
+
+.settings-grid input[type="range"] {
+  width: 100%;
+}
+
+.settings-grid small {
+  color: #17202a;
+  font-size: 12px;
+}
+
+.settings-grid .checkbox-setting {
+  align-content: center;
+  grid-template-columns: auto 1fr;
+}
+
+.settings-grid .checkbox-setting input {
+  margin: 2px 0 0;
+}
+
+.region-settings {
+  align-items: center;
+  background: #f6f9fd;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px;
+}
+
+.region-settings strong {
+  margin-right: 4px;
+}
+
+.region-settings label {
+  align-items: center;
+  color: #3f5062;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 7px;
+}
+
+.region-settings input {
+  margin: 0;
+}
+
+.region-settings span {
+  color: #52677c;
+  flex-basis: 100%;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .global-error,
@@ -726,7 +812,8 @@ h3 {
   .video-grid,
   .analysis-panel,
   .metrics,
-  .lab-controls {
+  .lab-controls,
+  .settings-grid {
     grid-template-columns: 1fr;
   }
 
@@ -743,7 +830,8 @@ h3 {
 
   .topbar,
   .pane-header,
-  .sync-header {
+  .sync-header,
+  .settings-title {
     align-items: flex-start;
     flex-direction: column;
   }

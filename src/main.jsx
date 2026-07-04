@@ -13,9 +13,31 @@ import { DrawingUtils, FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-
 import "./styles.css";
 
 const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
-const modelUrl =
-  "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 const labHistoryKey = "dmpa.lab.history.v1";
+const mediaPipeSettingsKey = "dmpa.mediapipe.settings.v1";
+
+const modelUrls = {
+  lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+  full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",
+  heavy: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
+};
+
+const defaultMediaPipeSettings = {
+  modelVariant: "lite",
+  delegate: "GPU",
+  numPoses: 1,
+  minPoseDetectionConfidence: 0.45,
+  minPosePresenceConfidence: 0.45,
+  minTrackingConfidence: 0.45,
+  outputSegmentationMasks: false,
+  scanFps: 5,
+  landmarkSet: "core13",
+  regions: {
+    arms: true,
+    torso: true,
+    legs: true
+  }
+};
 
 const landmarkNames = {
   0: "нос",
@@ -33,18 +55,61 @@ const landmarkNames = {
   28: "правая стопа"
 };
 
-const angleSpecs = [
-  { id: "leftElbow", title: "Левый локоть", points: [11, 13, 15], weight: 1 },
-  { id: "rightElbow", title: "Правый локоть", points: [12, 14, 16], weight: 1 },
-  { id: "leftShoulder", title: "Левое плечо", points: [13, 11, 23], weight: 1.1 },
-  { id: "rightShoulder", title: "Правое плечо", points: [14, 12, 24], weight: 1.1 },
-  { id: "leftHip", title: "Левое бедро", points: [11, 23, 25], weight: 1.1 },
-  { id: "rightHip", title: "Правое бедро", points: [12, 24, 26], weight: 1.1 },
-  { id: "leftKnee", title: "Левое колено", points: [23, 25, 27], weight: 1.2 },
-  { id: "rightKnee", title: "Правое колено", points: [24, 26, 28], weight: 1.2 },
-  { id: "torsoTilt", title: "Наклон корпуса", points: [11, 23, 24], weight: 1.2 },
-  { id: "shoulderLine", title: "Линия плеч", points: [23, 11, 12], weight: 0.8 }
+const coreLandmarkIds = Object.keys(landmarkNames).map(Number);
+
+const poseLandmarkCatalog = [
+  "нос",
+  "левый глаз внутри",
+  "левый глаз",
+  "левый глаз снаружи",
+  "правый глаз внутри",
+  "правый глаз",
+  "правый глаз снаружи",
+  "левое ухо",
+  "правое ухо",
+  "левый угол рта",
+  "правый угол рта",
+  "левое плечо",
+  "правое плечо",
+  "левый локоть",
+  "правый локоть",
+  "левое запястье",
+  "правое запястье",
+  "левый мизинец",
+  "правый мизинец",
+  "левый указательный",
+  "правый указательный",
+  "левый большой палец",
+  "правый большой палец",
+  "левое бедро",
+  "правое бедро",
+  "левое колено",
+  "правое колено",
+  "левая лодыжка",
+  "правая лодыжка",
+  "левая пятка",
+  "правая пятка",
+  "носок левой стопы",
+  "носок правой стопы"
 ];
+
+const angleSpecs = [
+  { id: "leftElbow", title: "Левый локоть", points: [11, 13, 15], weight: 1, region: "arms" },
+  { id: "rightElbow", title: "Правый локоть", points: [12, 14, 16], weight: 1, region: "arms" },
+  { id: "leftShoulder", title: "Левое плечо", points: [13, 11, 23], weight: 1.1, region: "arms" },
+  { id: "rightShoulder", title: "Правое плечо", points: [14, 12, 24], weight: 1.1, region: "arms" },
+  { id: "leftHip", title: "Левое бедро", points: [11, 23, 25], weight: 1.1, region: "torso" },
+  { id: "rightHip", title: "Правое бедро", points: [12, 24, 26], weight: 1.1, region: "torso" },
+  { id: "leftKnee", title: "Левое колено", points: [23, 25, 27], weight: 1.2, region: "legs" },
+  { id: "rightKnee", title: "Правое колено", points: [24, 26, 28], weight: 1.2, region: "legs" },
+  { id: "torsoTilt", title: "Наклон корпуса", points: [11, 23, 24], weight: 1.2, region: "torso" },
+  { id: "shoulderLine", title: "Линия плеч", points: [23, 11, 12], weight: 0.8, region: "torso" }
+];
+
+function activeAngleSpecs(regions = defaultMediaPipeSettings.regions) {
+  const selected = angleSpecs.filter((spec) => regions?.[spec.region]);
+  return selected.length ? selected : angleSpecs;
+}
 
 function angle(a, b, c) {
   if (!a || !b || !c) return null;
@@ -57,10 +122,10 @@ function angle(a, b, c) {
   return Number(value.toFixed(1));
 }
 
-function poseAngles(landmarks) {
+function poseAngles(landmarks, specs = angleSpecs) {
   if (!landmarks?.length) return {};
   return Object.fromEntries(
-    angleSpecs.map((spec) => [spec.id, angle(landmarks[spec.points[0]], landmarks[spec.points[1]], landmarks[spec.points[2]])])
+    specs.map((spec) => [spec.id, angle(landmarks[spec.points[0]], landmarks[spec.points[1]], landmarks[spec.points[2]])])
   );
 }
 
@@ -88,7 +153,7 @@ function projectLandmarksToCanvas(landmarks, rect, canvasWidth, canvasHeight) {
   }));
 }
 
-function comparePoseFrames(left, right) {
+function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regions) {
   if (!left?.landmarks?.length || !right?.landmarks?.length) {
     return {
       ready: false,
@@ -99,12 +164,13 @@ function comparePoseFrames(left, right) {
     };
   }
 
-  const leftAngles = poseAngles(left.landmarks);
-  const rightAngles = poseAngles(right.landmarks);
+  const specs = activeAngleSpecs(regions);
+  const leftAngles = poseAngles(left.landmarks, specs);
+  const rightAngles = poseAngles(right.landmarks, specs);
   let weightedScore = 0;
   let totalWeight = 0;
 
-  const rows = angleSpecs
+  const rows = specs
     .map((spec) => {
       const leftValue = leftAngles[spec.id];
       const rightValue = rightAngles[spec.id];
@@ -141,8 +207,8 @@ function comparePoseFrames(left, right) {
   };
 }
 
-function compareScans(leftScan, rightScan, sync) {
-  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null);
+function compareScans(leftScan, rightScan, sync, regions = defaultMediaPipeSettings.regions) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null, regions);
 
   const offset = sync?.ready ? sync.offsetSeconds : 0;
   const usableFrames = leftScan.frames
@@ -153,12 +219,12 @@ function compareScans(leftScan, rightScan, sync) {
       return {
         leftTime: leftFrame.time,
         rightTime: rightFrame.time,
-        comparison: comparePoseFrames(leftFrame, rightFrame)
+        comparison: comparePoseFrames(leftFrame, rightFrame, regions)
       };
     })
     .filter(Boolean);
 
-  if (!usableFrames.length) return comparePoseFrames(null, null);
+  if (!usableFrames.length) return comparePoseFrames(null, null, regions);
 
   const totals = new Map();
   let scoreSum = 0;
@@ -266,7 +332,47 @@ function pendingFullRunComparison() {
   };
 }
 
-function usePoseLandmarker() {
+function normalizeMediaPipeSettings(settings) {
+  return {
+    ...defaultMediaPipeSettings,
+    ...(settings || {}),
+    modelVariant: modelUrls[settings?.modelVariant] ? settings.modelVariant : defaultMediaPipeSettings.modelVariant,
+    delegate: settings?.delegate === "CPU" ? "CPU" : "GPU",
+    numPoses: Math.max(1, Math.min(4, Number(settings?.numPoses || defaultMediaPipeSettings.numPoses))),
+    scanFps: Math.max(1, Math.min(15, Number(settings?.scanFps || defaultMediaPipeSettings.scanFps))),
+    outputSegmentationMasks: Boolean(settings?.outputSegmentationMasks),
+    landmarkSet: settings?.landmarkSet === "full33" ? "full33" : "core13",
+    regions: {
+      ...defaultMediaPipeSettings.regions,
+      ...(settings?.regions || {})
+    }
+  };
+}
+
+function loadMediaPipeSettings() {
+  try {
+    return normalizeMediaPipeSettings(JSON.parse(localStorage.getItem(mediaPipeSettingsKey) || "null"));
+  } catch {
+    return defaultMediaPipeSettings;
+  }
+}
+
+function detectorOptions(settings, runningMode) {
+  return {
+    baseOptions: {
+      modelAssetPath: modelUrls[settings.modelVariant],
+      delegate: settings.delegate
+    },
+    runningMode,
+    numPoses: settings.numPoses,
+    minPoseDetectionConfidence: settings.minPoseDetectionConfidence,
+    minPosePresenceConfidence: settings.minPosePresenceConfidence,
+    minTrackingConfidence: settings.minTrackingConfidence,
+    outputSegmentationMasks: settings.outputSegmentationMasks
+  };
+}
+
+function usePoseLandmarker(settings) {
   const [landmarker, setLandmarker] = useState(null);
   const [scanLandmarker, setScanLandmarker] = useState(null);
   const [error, setError] = useState("");
@@ -274,30 +380,13 @@ function usePoseLandmarker() {
   useEffect(() => {
     let cancelled = false;
     async function boot() {
+      setLandmarker(null);
+      setScanLandmarker(null);
+      setError("");
       try {
         const fileset = await FilesetResolver.forVisionTasks(wasmBase);
-        const detector = await PoseLandmarker.createFromOptions(fileset, {
-          baseOptions: {
-            modelAssetPath: modelUrl,
-            delegate: "GPU"
-          },
-          runningMode: "VIDEO",
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.45,
-          minPosePresenceConfidence: 0.45,
-          minTrackingConfidence: 0.45
-        });
-        const scanDetector = await PoseLandmarker.createFromOptions(fileset, {
-          baseOptions: {
-            modelAssetPath: modelUrl,
-            delegate: "GPU"
-          },
-          runningMode: "IMAGE",
-          numPoses: 1,
-          minPoseDetectionConfidence: 0.45,
-          minPosePresenceConfidence: 0.45,
-          minTrackingConfidence: 0.45
-        });
+        const detector = await PoseLandmarker.createFromOptions(fileset, detectorOptions(settings, "VIDEO"));
+        const scanDetector = await PoseLandmarker.createFromOptions(fileset, detectorOptions(settings, "IMAGE"));
         if (!cancelled) {
           setLandmarker(detector);
           setScanLandmarker(scanDetector);
@@ -310,8 +399,10 @@ function usePoseLandmarker() {
     boot();
     return () => {
       cancelled = true;
+      landmarker?.close?.();
+      scanLandmarker?.close?.();
     };
-  }, []);
+  }, [settings]);
 
   return { landmarker, scanLandmarker, error };
 }
@@ -340,7 +431,7 @@ function waitForVideoEvent(video, eventName) {
   });
 }
 
-async function scanVideoPose(video, scanLandmarker, onProgress, range = null) {
+async function scanVideoPose(video, scanLandmarker, onProgress, range = null, settings = defaultMediaPipeSettings) {
   if (!video || !scanLandmarker || !Number.isFinite(video.duration)) {
     throw new Error("Видео еще не готово для сканирования.");
   }
@@ -353,7 +444,8 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null) {
   const scanStart = Math.max(0, Math.min(range?.start ?? 0, duration));
   const scanEnd = Math.max(scanStart, Math.min(range?.end ?? duration, duration));
   const scanDuration = Math.max(0.01, scanEnd - scanStart);
-  const step = scanDuration > 90 ? 0.33 : 0.2;
+  const step = 1 / Math.max(1, Number(settings.scanFps || defaultMediaPipeSettings.scanFps));
+  const specs = activeAngleSpecs(settings.regions);
   const frames = [];
 
   for (let time = scanStart; time <= scanEnd; time += step) {
@@ -367,7 +459,7 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null) {
     frames.push({
       time: Number(video.currentTime.toFixed(3)),
       landmarks,
-      angles: poseAngles(landmarks),
+      angles: poseAngles(landmarks, specs),
       confidence: landmarks.length ? averageVisibility(landmarks) : 0
     });
     onProgress?.(Math.min(100, Math.round(((time - scanStart) / scanDuration) * 100)));
@@ -381,6 +473,12 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null) {
   return {
     duration,
     range: { start: scanStart, end: scanEnd },
+    settings: {
+      scanFps: settings.scanFps,
+      landmarkSet: settings.landmarkSet,
+      regions: settings.regions,
+      activeAngles: specs.map((spec) => spec.id)
+    },
     frames,
     trackedFrames: trackedFrames.length,
     averageConfidence: trackedFrames.length
@@ -532,6 +630,7 @@ const VideoPane = forwardRef(function VideoPane(
     onCommentChange,
     analysisRange,
     onAnalysisRangeChange,
+    mediaPipeSettings,
     showAnalysisRange = false
   },
   ref
@@ -551,6 +650,7 @@ const VideoPane = forwardRef(function VideoPane(
   const [isScanning, setIsScanning] = useState(false);
   const [showCameraPrompt, setShowCameraPrompt] = useState(false);
   const isScanningRef = useRef(false);
+  const specs = useMemo(() => activeAngleSpecs(mediaPipeSettings?.regions), [mediaPipeSettings?.regions]);
 
   const stopCamera = useCallback(() => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -627,7 +727,7 @@ const VideoPane = forwardRef(function VideoPane(
 
       onPose({
         landmarks: isInsideAnalysisRange ? landmarks : [],
-        angles: isInsideAnalysisRange ? poseAngles(landmarks) : {},
+        angles: isInsideAnalysisRange ? poseAngles(landmarks, specs) : {},
         timestamp: video.currentTime,
         confidence: landmarks.length && isInsideAnalysisRange ? averageVisibility(landmarks) : 0
       });
@@ -635,7 +735,7 @@ const VideoPane = forwardRef(function VideoPane(
     }
 
     rafRef.current = requestAnimationFrame(analyzeFrame);
-  }, [analysisRange, landmarker, onPose, showAnalysisRange, side]);
+  }, [analysisRange, landmarker, onPose, showAnalysisRange, side, specs]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(analyzeFrame);
@@ -744,7 +844,13 @@ const VideoPane = forwardRef(function VideoPane(
     isScanningRef.current = true;
     setScanProgress(1);
     try {
-      const result = await scanVideoPose(video, scanLandmarker, setScanProgress, showAnalysisRange ? analysisRange : null);
+      const result = await scanVideoPose(
+        video,
+        scanLandmarker,
+        setScanProgress,
+        showAnalysisRange ? analysisRange : null,
+        mediaPipeSettings
+      );
       onScanComplete(result);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -970,34 +1076,172 @@ function downloadJson(filename, data) {
   URL.revokeObjectURL(url);
 }
 
-function serializeLandmarks(landmarks) {
-  return (landmarks || []).map((point) => ({
-    x: Number(point.x.toFixed(5)),
-    y: Number(point.y.toFixed(5)),
-    z: Number((point.z || 0).toFixed(5)),
-    visibility: Number((point.visibility || 0).toFixed(3))
-  }));
+function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
+  const specs = activeAngleSpecs(settings.regions);
+  const update = (patch) => onChange(normalizeMediaPipeSettings({ ...settings, ...patch }));
+  const updateNumber = (key, value) => update({ [key]: Number(value) });
+  const updateRegion = (key, checked) => update({ regions: { ...settings.regions, [key]: checked } });
+
+  return (
+    <section className="settings-panel">
+      <div className="settings-title">
+        <div>
+          <p className="eyebrow">MediaPipe Settings</p>
+          <h2>Параметры трекинга и датасета</h2>
+        </div>
+        <span className={`status ${isReady ? "status-good" : ""}`}>{isReady ? "модель активна" : "модель загружается"}</span>
+      </div>
+
+      <div className="settings-grid">
+        <label>
+          Модель Pose Landmarker
+          <select value={settings.modelVariant} onChange={(event) => update({ modelVariant: event.target.value })}>
+            <option value="lite">Lite - быстрее</option>
+            <option value="full">Full - баланс</option>
+            <option value="heavy">Heavy - точнее, медленнее</option>
+          </select>
+        </label>
+        <label>
+          Вычисление
+          <select value={settings.delegate} onChange={(event) => update({ delegate: event.target.value })}>
+            <option value="GPU">GPU</option>
+            <option value="CPU">CPU</option>
+          </select>
+        </label>
+        <label>
+          Максимум поз
+          <input
+            type="number"
+            min="1"
+            max="4"
+            value={settings.numPoses}
+            onChange={(event) => updateNumber("numPoses", event.target.value)}
+          />
+        </label>
+        <label>
+          FPS сканирования
+          <select value={settings.scanFps} onChange={(event) => updateNumber("scanFps", event.target.value)}>
+            <option value="2">2 кадра/сек</option>
+            <option value="3">3 кадра/сек</option>
+            <option value="5">5 кадров/сек</option>
+            <option value="10">10 кадров/сек</option>
+            <option value="15">15 кадров/сек</option>
+          </select>
+        </label>
+        <label>
+          Точки в датасете
+          <select value={settings.landmarkSet} onChange={(event) => update({ landmarkSet: event.target.value })}>
+            <option value="core13">13 ключевых точек</option>
+            <option value="full33">Все 33 точки MediaPipe</option>
+          </select>
+        </label>
+        <label className="checkbox-setting">
+          <input
+            type="checkbox"
+            checked={settings.outputSegmentationMasks}
+            onChange={(event) => update({ outputSegmentationMasks: event.target.checked })}
+          />
+          Маска сегментации тела
+        </label>
+        <label>
+          Detection confidence
+          <input
+            type="range"
+            min="0.1"
+            max="0.95"
+            step="0.05"
+            value={settings.minPoseDetectionConfidence}
+            onChange={(event) => updateNumber("minPoseDetectionConfidence", event.target.value)}
+          />
+          <small>{settings.minPoseDetectionConfidence.toFixed(2)}</small>
+        </label>
+        <label>
+          Presence confidence
+          <input
+            type="range"
+            min="0.1"
+            max="0.95"
+            step="0.05"
+            value={settings.minPosePresenceConfidence}
+            onChange={(event) => updateNumber("minPosePresenceConfidence", event.target.value)}
+          />
+          <small>{settings.minPosePresenceConfidence.toFixed(2)}</small>
+        </label>
+        <label>
+          Tracking confidence
+          <input
+            type="range"
+            min="0.1"
+            max="0.95"
+            step="0.05"
+            value={settings.minTrackingConfidence}
+            onChange={(event) => updateNumber("minTrackingConfidence", event.target.value)}
+          />
+          <small>{settings.minTrackingConfidence.toFixed(2)}</small>
+        </label>
+      </div>
+
+      <div className="region-settings">
+        <strong>Области сравнения</strong>
+        <label>
+          <input type="checkbox" checked={settings.regions.arms} onChange={(event) => updateRegion("arms", event.target.checked)} />
+          Руки и плечи
+        </label>
+        <label>
+          <input type="checkbox" checked={settings.regions.torso} onChange={(event) => updateRegion("torso", event.target.checked)} />
+          Корпус и бедра
+        </label>
+        <label>
+          <input type="checkbox" checked={settings.regions.legs} onChange={(event) => updateRegion("legs", event.target.checked)} />
+          Ноги и колени
+        </label>
+        <span>
+          MediaPipe возвращает 33 точки. В сравнении сейчас активно {specs.length} углов, в датасет сохраняется{" "}
+          {settings.landmarkSet === "full33" ? "33 точки" : "13 ключевых точек"}.
+        </span>
+      </div>
+    </section>
+  );
 }
 
-function serializeScanSkeleton(scan) {
+function serializeLandmarks(landmarks, landmarkSet = "core13") {
+  const ids = landmarkSet === "full33" ? poseLandmarkCatalog.map((_, index) => index) : coreLandmarkIds;
+  return ids
+    .map((id) => {
+      const point = landmarks?.[id];
+      if (!point) return null;
+      return {
+        id,
+        name: poseLandmarkCatalog[id] || landmarkNames[id] || `landmark ${id}`,
+        x: Number(point.x.toFixed(5)),
+        y: Number(point.y.toFixed(5)),
+        z: Number((point.z || 0).toFixed(5)),
+        visibility: Number((point.visibility || 0).toFixed(3))
+      };
+    })
+    .filter(Boolean);
+}
+
+function serializeScanSkeleton(scan, settings = defaultMediaPipeSettings) {
   if (!scan?.frames?.length) return null;
   return {
     duration: scan.duration,
     range: scan.range || null,
     trackedFrames: scan.trackedFrames,
     averageConfidence: Number((scan.averageConfidence || 0).toFixed(4)),
+    landmarkSet: settings.landmarkSet,
     frames: scan.frames
       .filter((frame) => frame.landmarks?.length)
       .map((frame) => ({
         time: frame.time,
         confidence: Number((frame.confidence || 0).toFixed(4)),
         angles: frame.angles,
-        landmarks: serializeLandmarks(frame.landmarks)
+        landmarks: serializeLandmarks(frame.landmarks, settings.landmarkSet)
       }))
   };
 }
 
-function serializeSkeletonPairs(leftScan, rightScan, sync) {
+function serializeSkeletonPairs(leftScan, rightScan, sync, settings = defaultMediaPipeSettings) {
   if (!leftScan?.frames?.length || !rightScan?.frames?.length) return [];
   const offset = sync?.ready ? sync.offsetSeconds : 0;
   return leftScan.frames
@@ -1008,8 +1252,8 @@ function serializeSkeletonPairs(leftScan, rightScan, sync) {
       return {
         leftTime: leftFrame.time,
         rightTime: rightFrame.time,
-        leftLandmarks: serializeLandmarks(leftFrame.landmarks),
-        rightLandmarks: serializeLandmarks(rightFrame.landmarks)
+        leftLandmarks: serializeLandmarks(leftFrame.landmarks, settings.landmarkSet),
+        rightLandmarks: serializeLandmarks(rightFrame.landmarks, settings.landmarkSet)
       };
     })
     .filter(Boolean);
@@ -1178,7 +1422,8 @@ function drawWave(ctx, waveform, width, height, color, offsetSeconds) {
 }
 
 function App() {
-  const { landmarker, scanLandmarker, error } = usePoseLandmarker();
+  const [mediaPipeSettings, setMediaPipeSettings] = useState(() => loadMediaPipeSettings());
+  const { landmarker, scanLandmarker, error } = usePoseLandmarker(mediaPipeSettings);
   const leftVideoRef = useRef(null);
   const rightVideoRef = useRef(null);
   const analysisRafRef = useRef(0);
@@ -1199,8 +1444,15 @@ function App() {
   const [runState, setRunState] = useState({ status: "idle", progress: 0, result: null, message: "" });
   const [expectedScore, setExpectedScore] = useState("");
   const [labHistory, setLabHistory] = useState(() => loadLabHistory());
-  const liveComparison = useMemo(() => comparePoseFrames(leftPose, rightPose), [leftPose, rightPose]);
-  const scanComparison = useMemo(() => compareScans(leftScan, rightScan, sync), [leftScan, rightScan, sync]);
+  const activeSpecs = useMemo(() => activeAngleSpecs(mediaPipeSettings.regions), [mediaPipeSettings.regions]);
+  const liveComparison = useMemo(
+    () => comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions),
+    [leftPose, rightPose, mediaPipeSettings.regions]
+  );
+  const scanComparison = useMemo(
+    () => compareScans(leftScan, rightScan, sync, mediaPipeSettings.regions),
+    [leftScan, rightScan, sync, mediaPipeSettings.regions]
+  );
   const comparison = runState.result || (leftScan?.frames?.length && rightScan?.frames?.length ? pendingFullRunComparison() : liveComparison);
   const confidence = Math.round(
     scanComparison.ready
@@ -1213,6 +1465,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(labHistoryKey, JSON.stringify(labHistory));
   }, [labHistory]);
+
+  useEffect(() => {
+    localStorage.setItem(mediaPipeSettingsKey, JSON.stringify(mediaPipeSettings));
+  }, [mediaPipeSettings]);
 
   const nextMediaPipeTimestamp = useCallback(() => {
     const now = performance.now();
@@ -1311,7 +1567,7 @@ function App() {
       if (elapsed >= playableSeconds - 0.05) {
         leftVideoRef.current?.pause();
         rightVideoRef.current?.pause();
-        const result = compareScans(leftScan, rightScan, activeSync);
+        const result = compareScans(leftScan, rightScan, activeSync, mediaPipeSettings.regions);
         setRunState({
           status: "done",
           progress: 100,
@@ -1339,6 +1595,15 @@ function App() {
       rightFileName: rightFile?.name || "",
       expectedScore: expectedScore === "" ? null : Number(expectedScore),
       score: runState.result.score,
+      mediaPipeSettings: {
+        ...mediaPipeSettings,
+        activeAngles: activeSpecs.map((spec) => ({
+          id: spec.id,
+          title: spec.title,
+          region: spec.region,
+          points: spec.points
+        }))
+      },
       sync,
       leftAnalysisRange,
       metrics: {
@@ -1350,9 +1615,9 @@ function App() {
       },
       angleRows: runState.result.rows,
       skeletons: {
-        left: serializeScanSkeleton(leftScan),
-        right: serializeScanSkeleton(rightScan),
-        synchronizedPairs: serializeSkeletonPairs(leftScan, rightScan, sync)
+        left: serializeScanSkeleton(leftScan, mediaPipeSettings),
+        right: serializeScanSkeleton(rightScan, mediaPipeSettings),
+        synchronizedPairs: serializeSkeletonPairs(leftScan, rightScan, sync, mediaPipeSettings)
       },
       suggestions: runState.result.suggestions,
       verdict: runState.result.verdict
@@ -1374,9 +1639,25 @@ function App() {
         </div>
         <div className="model-state">
           <Sparkles size={18} />
-          {landmarker ? "MediaPipe готов" : "Загрузка модели..."}
+          {landmarker && scanLandmarker ? "MediaPipe готов" : "Загрузка модели..."}
         </div>
       </header>
+
+      <MediaPipeSettingsPanel
+        settings={mediaPipeSettings}
+        onChange={(settings) => {
+          setMediaPipeSettings(settings);
+          setLeftScan(null);
+          setRightScan(null);
+          setRunState({
+            status: "idle",
+            progress: 0,
+            result: null,
+            message: "Настройки MediaPipe изменены. Пересканируйте оба видео для новой версии датасета."
+          });
+        }}
+        isReady={Boolean(landmarker && scanLandmarker)}
+      />
 
       {error && <div className="global-error">{error}</div>}
 
@@ -1406,6 +1687,7 @@ function App() {
           onCommentChange={setLeftComment}
           showAnalysisRange
           analysisRange={leftAnalysisRange}
+          mediaPipeSettings={mediaPipeSettings}
           onAnalysisRangeChange={(range) => {
             setLeftAnalysisRange({
               start: Number(Math.max(0, range.start).toFixed(2)),
@@ -1437,6 +1719,7 @@ function App() {
           active={Boolean(rightPose?.landmarks?.length)}
           comment={rightComment}
           onCommentChange={setRightComment}
+          mediaPipeSettings={mediaPipeSettings}
         />
       </section>
 
@@ -1512,7 +1795,7 @@ function App() {
               <span>Правое</span>
               <span>Разница</span>
             </div>
-            {(comparison.rows.length ? comparison.rows : angleSpecs).map((row) => (
+            {(comparison.rows.length ? comparison.rows : activeSpecs).map((row) => (
               <div className="table-row" key={row.id}>
                 <span>{row.title}</span>
                 <span>{row.leftValue ?? "-"}°</span>
