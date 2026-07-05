@@ -62,6 +62,7 @@ const comparisonModels = {
 
 const comparisonModelKey = "dmpa.comparison.model.v1";
 const maxScanFrames = 720;
+const mobileMaxScanFrames = 220;
 const maxOverlayPreviewFrames = 240;
 
 const landmarkNames = {
@@ -593,7 +594,7 @@ function nearestFrame(frames, time) {
       bestDiff = diff;
     }
   }
-  return bestDiff <= 0.35 ? best : null;
+  return bestDiff <= 1.05 ? best : null;
 }
 
 function normalizedCenterDifference(leftLandmarks, rightLandmarks) {
@@ -729,6 +730,25 @@ function waitForVideoEvent(video, eventName) {
   });
 }
 
+function isMemoryConstrainedDevice() {
+  const ua = navigator.userAgent || "";
+  const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  return isIOS || (navigator.deviceMemory && navigator.deviceMemory <= 4);
+}
+
+function compactLandmarks(landmarks) {
+  return (landmarks || []).map((point) => ({
+    x: Number(point.x.toFixed(5)),
+    y: Number(point.y.toFixed(5)),
+    z: Number((point.z || 0).toFixed(5)),
+    visibility: Number((point.visibility || 0).toFixed(3))
+  }));
+}
+
+function yieldToBrowser() {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
 async function scanVideoPose(video, scanLandmarker, onProgress, range = null, settings = defaultMediaPipeSettings) {
   if (!video || !scanLandmarker || !Number.isFinite(video.duration)) {
     throw new Error("Видео еще не готово для сканирования.");
@@ -742,46 +762,64 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
   const scanStart = Math.max(0, Math.min(range?.start ?? 0, duration));
   const scanEnd = Math.max(scanStart, Math.min(range?.end ?? duration, duration));
   const scanDuration = Math.max(0.01, scanEnd - scanStart);
-  const requestedStep = 1 / Math.max(1, Number(settings.scanFps || defaultMediaPipeSettings.scanFps));
-  const step = Math.max(requestedStep, scanDuration / maxScanFrames);
+  const mobileSafe = isMemoryConstrainedDevice();
+  const frameBudget = mobileSafe ? mobileMaxScanFrames : maxScanFrames;
+  const requestedFps = Math.max(1, Number(settings.scanFps || defaultMediaPipeSettings.scanFps));
+  const effectiveFps = mobileSafe ? Math.min(requestedFps, 3) : requestedFps;
+  const requestedStep = 1 / effectiveFps;
+  const step = Math.max(requestedStep, scanDuration / frameBudget);
   const specs = activeAngleSpecs(settings.regions);
   const frames = [];
+  let scannedFrames = 0;
 
   for (let time = scanStart; time <= scanEnd; time += step) {
+    scannedFrames += 1;
     const targetTime = Math.min(time, Math.max(0, duration - 0.02));
     if (Math.abs(video.currentTime - targetTime) > 0.01) {
       video.currentTime = targetTime;
       await waitForVideoEvent(video, "seeked");
     }
     const result = scanLandmarker.detect(video);
-    const landmarks = result.landmarks?.[0] || [];
-    frames.push({
-      time: Number(video.currentTime.toFixed(3)),
-      landmarks,
-      angles: poseAngles(landmarks, specs),
-      confidence: landmarks.length ? averageVisibility(landmarks) : 0
-    });
+    const rawLandmarks = result.landmarks?.[0] || [];
+    if (rawLandmarks.length) {
+      const landmarks = compactLandmarks(rawLandmarks);
+      frames.push({
+        time: Number(video.currentTime.toFixed(3)),
+        landmarks,
+        angles: poseAngles(landmarks, specs),
+        confidence: averageVisibility(landmarks)
+      });
+    }
     onProgress?.(Math.min(100, Math.round(((time - scanStart) / scanDuration) * 100)));
+    if (scannedFrames % 10 === 0) await yieldToBrowser();
   }
 
   video.currentTime = previousTime;
-  if (!wasPaused) await video.play();
+  if (!wasPaused) {
+    try {
+      await video.play();
+    } catch {
+      video.pause();
+    }
+  }
   onProgress?.(100);
 
-  const trackedFrames = frames.filter((frame) => frame.landmarks.length);
   return {
     duration,
     range: { start: scanStart, end: scanEnd },
     settings: {
       scanFps: settings.scanFps,
+      effectiveScanFps: Number((1 / step).toFixed(2)),
+      scannedFrames,
+      mobileSafe,
       landmarkSet: settings.landmarkSet,
       regions: settings.regions,
       activeAngles: specs.map((spec) => spec.id)
     },
     frames,
-    trackedFrames: trackedFrames.length,
-    averageConfidence: trackedFrames.length
-      ? trackedFrames.reduce((sum, frame) => sum + frame.confidence, 0) / trackedFrames.length
+    trackedFrames: frames.length,
+    averageConfidence: frames.length
+      ? frames.reduce((sum, frame) => sum + frame.confidence, 0) / frames.length
       : 0,
     scannedAt: new Date().toISOString()
   };
@@ -2377,4 +2415,38 @@ function averageVisibility(landmarks) {
   return visible.reduce((sum, value) => sum + value, 0) / visible.length;
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error(error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <main className="app">
+          <div className="global-error">
+            Приложение поймало ошибку после действия. Обновите страницу и попробуйте снизить FPS сканирования до 2-3 кадров/сек.
+            <br />
+            Деталь: {this.state.error.message || String(this.state.error)}
+          </div>
+        </main>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+createRoot(document.getElementById("root")).render(
+  <AppErrorBoundary>
+    <App />
+  </AppErrorBoundary>
+);
