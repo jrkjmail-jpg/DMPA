@@ -510,20 +510,6 @@ h3 {
   margin-top: 12px;
 }
 
-.video-comment {
-  color: #52677c;
-  display: grid;
-  font-size: 13px;
-  font-weight: 800;
-  gap: 7px;
-  margin-top: 12px;
-}
-
-.video-comment textarea {
-  min-height: 76px;
-  resize: vertical;
-}
-
 .sync-panel {
   background: #ffffff;
   border: 1px solid #dbe4ef;
@@ -950,6 +936,22 @@ h3 {
   color: #3f5062;
   font-size: 12px;
   padding: 5px 9px;
+}
+
+.file-facts {
+  background: #f6f9fd;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.file-facts p {
+  margin: 0;
+}
+
+.file-facts p + p {
+  margin-top: 7px;
 }
 
 .history-item p,

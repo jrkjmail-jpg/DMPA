@@ -997,6 +997,56 @@ function activeRegionLabels(regions = defaultMediaPipeSettings.regions) {
   return labels.length ? labels : ["все области"];
 }
 
+function formatBytes(bytes) {
+  if (!bytes) return "-";
+  const units = ["Б", "КБ", "МБ", "ГБ"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(unitIndex ? 1 : 0)} ${units[unitIndex]}`;
+}
+
+function fileProfile(file, scan, audio) {
+  if (!file) {
+    return {
+      source: "camera-or-empty",
+      name: "без файла",
+      size: 0,
+      sizeLabel: "-",
+      type: "",
+      lastModified: null,
+      lastModifiedIso: null,
+      duration: scan?.duration ?? audio?.duration ?? null,
+      durationLabel: scan?.duration || audio?.duration ? formatTime(scan?.duration ?? audio?.duration) : "-"
+    };
+  }
+  const duration = scan?.duration ?? audio?.duration ?? null;
+  return {
+    source: "file",
+    name: file.name,
+    size: file.size,
+    sizeLabel: formatBytes(file.size),
+    type: file.type || "unknown",
+    lastModified: file.lastModified || null,
+    lastModifiedIso: file.lastModified ? new Date(file.lastModified).toISOString() : null,
+    duration,
+    durationLabel: duration ? formatTime(duration) : "-",
+    scanRange: scan?.range || null,
+    scanFrames: scan?.frames?.length || 0,
+    trackedFrames: scan?.trackedFrames || 0,
+    audioDuration: audio?.duration || null
+  };
+}
+
+function sameFileCandidate(left, right) {
+  if (!left || !right || left.source !== "file" || right.source !== "file") return false;
+  const durationDiff = Math.abs((left.duration || 0) - (right.duration || 0));
+  return left.name === right.name && left.size === right.size && durationDiff < 0.05;
+}
+
 const VideoPane = forwardRef(function VideoPane(
   {
     title,
@@ -1010,8 +1060,6 @@ const VideoPane = forwardRef(function VideoPane(
     onScanComplete,
     scan,
     active,
-    comment,
-    onCommentChange,
     analysisRange,
     onAnalysisRangeChange,
     mediaPipeSettings,
@@ -1429,18 +1477,6 @@ const VideoPane = forwardRef(function VideoPane(
           Скан: {scan?.settings ? `${scan.settings.modelVariant} / ${scan.settings.effectiveScanFps} fps / ${scan.settings.landmarkSet}` : "-"}
         </span>
       </div>
-      <label className="video-comment">
-        Комментарий для датасета
-        <textarea
-          value={comment}
-          onChange={(event) => onCommentChange(event.target.value)}
-          placeholder={
-            side === "left"
-              ? "Например: танец 1, эталон, оригинальная хореография"
-              : "Например: танец 1 дубль 2, тот же танец / танец 2, другой стиль"
-          }
-        />
-      </label>
       {error && <p className="pane-error">{error}</p>}
     </section>
   );
@@ -1702,7 +1738,7 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
           />
         </label>
         <button type="button" onClick={onSave} disabled={!canSave}>
-          Сохранить пример
+          Сохранить пример вручную
         </button>
         <button type="button" onClick={onExport} disabled={!history.length}>
           Экспорт JSON
@@ -1717,7 +1753,7 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
           history.slice(0, 8).map((item) => (
             <article key={item.id} className="history-item">
               <strong>
-                {item.score}% схожесть{item.expectedScore !== null ? ` / ожидалось ${item.expectedScore}%` : ""}
+                {item.score}% схожесть{item.expectedScore != null ? ` / ожидалось ${item.expectedScore}%` : ""}
               </strong>
               <span>{new Date(item.createdAt).toLocaleString()}</span>
               <div className="history-tags">
@@ -1725,15 +1761,26 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
                 <b>{item.mediaPipeSettings?.modelVariant || "lite"}</b>
                 <b>{item.mediaPipeSettings?.landmarkSet === "full33" ? "33 точки" : "13 точек"}</b>
                 <b>{item.metrics?.framesCompared || 0} кадров</b>
+                <b>{item.saveMode === "auto" ? "авто" : "ручное"}</b>
+                <b>{item.videos?.sameFileCandidate ? "похоже один файл" : "файлы различаются"}</b>
               </div>
-              <p>
-                Эталон: {item.leftComment || "без комментария"} | Правое: {item.rightComment || "без комментария"}
-              </p>
+              <div className="file-facts">
+                <p>
+                  <b>Эталон:</b> {item.videos?.left?.name || item.leftFileName || "без файла"} |{" "}
+                  {item.videos?.left?.sizeLabel || "-"} | {item.videos?.left?.durationLabel || "-"} |{" "}
+                  {item.videos?.left?.type || "-"}
+                </p>
+                <p>
+                  <b>Правое:</b> {item.videos?.right?.name || item.rightFileName || "без файла"} |{" "}
+                  {item.videos?.right?.sizeLabel || "-"} | {item.videos?.right?.durationLabel || "-"} |{" "}
+                  {item.videos?.right?.type || "-"}
+                </p>
+              </div>
               <p>
                 Метрики: лучший {item.metrics?.bestScore ?? "-"}%, худший {item.metrics?.worstScore ?? "-"}%, длительность{" "}
                 {item.metrics?.durationCompared ?? "-"} сек, аудио-смещение {item.sync?.ready ? `${item.sync.offsetSeconds} сек` : "нет"}.
               </p>
-              {item.expectedScore !== null && (
+              {item.expectedScore != null && (
                 <p>
                   Ошибка модели относительно ожидания: {Math.abs(item.score - item.expectedScore)} п.п.
                 </p>
@@ -2087,8 +2134,6 @@ function App() {
   const [rightPose, setRightPose] = useState(null);
   const [leftFile, setLeftFile] = useState(null);
   const [rightFile, setRightFile] = useState(null);
-  const [leftComment, setLeftComment] = useState("");
-  const [rightComment, setRightComment] = useState("");
   const [leftScan, setLeftScan] = useState(null);
   const [rightScan, setRightScan] = useState(null);
   const [leftAudio, setLeftAudio] = useState(null);
@@ -2215,6 +2260,7 @@ function App() {
       await Promise.all([leftVideoRef.current?.playAt(leftStart, false), rightVideoRef.current?.playAt(rightStart, false)]);
     } catch (err) {
       const result = compareByModel(comparisonModel, leftScan, rightScan, activeSync, mediaPipeSettings.regions, leftAudio);
+      saveLabExample(result, activeSync, "auto");
       setRunState({
         status: "done",
         progress: 100,
@@ -2235,6 +2281,7 @@ function App() {
         leftVideoRef.current?.pause();
         rightVideoRef.current?.pause();
         const result = compareByModel(comparisonModel, leftScan, rightScan, activeSync, mediaPipeSettings.regions, leftAudio);
+        saveLabExample(result, activeSync, "auto");
         setRunState({
           status: "done",
           progress: 100,
@@ -2251,17 +2298,24 @@ function App() {
     analysisRafRef.current = requestAnimationFrame(tick);
   }
 
-  function saveLabExample() {
-    if (!runState.result?.ready) return;
+  function saveLabExample(resultOverride = null, syncOverride = sync, saveMode = "manual") {
+    const result = resultOverride || runState.result;
+    if (!result?.ready) return;
+    const leftVideoProfile = fileProfile(leftFile, leftScan, leftAudio);
+    const rightVideoProfile = fileProfile(rightFile, rightScan, rightAudio);
     const nextItem = {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
-      leftComment,
-      rightComment,
       leftFileName: leftFile?.name || "",
       rightFileName: rightFile?.name || "",
+      saveMode,
       expectedScore: expectedScore === "" ? null : Number(expectedScore),
-      score: runState.result.score,
+      score: result.score,
+      videos: {
+        left: leftVideoProfile,
+        right: rightVideoProfile,
+        sameFileCandidate: sameFileCandidate(leftVideoProfile, rightVideoProfile)
+      },
       comparisonModel,
       comparisonModelDetails: comparisonModels[comparisonModel],
       mediaPipeSettings: {
@@ -2273,23 +2327,23 @@ function App() {
           points: spec.points
         }))
       },
-      sync,
+      sync: syncOverride,
       leftAnalysisRange,
       metrics: {
-        framesCompared: runState.result.framesCompared || 0,
-        bestScore: runState.result.bestScore ?? null,
-        worstScore: runState.result.worstScore ?? null,
-        durationCompared: runState.result.durationCompared ?? null,
-        worstMoment: runState.result.worstMoment ?? null
+        framesCompared: result.framesCompared || 0,
+        bestScore: result.bestScore ?? null,
+        worstScore: result.worstScore ?? null,
+        durationCompared: result.durationCompared ?? null,
+        worstMoment: result.worstMoment ?? null
       },
-      angleRows: runState.result.rows,
+      angleRows: result.rows,
       skeletons: {
         left: serializeScanSkeleton(leftScan, mediaPipeSettings),
         right: serializeScanSkeleton(rightScan, mediaPipeSettings),
-        synchronizedPairs: serializeSkeletonPairs(leftScan, rightScan, sync, mediaPipeSettings)
+        synchronizedPairs: serializeSkeletonPairs(leftScan, rightScan, syncOverride, mediaPipeSettings)
       },
-      suggestions: runState.result.suggestions,
-      verdict: runState.result.verdict
+      suggestions: result.suggestions,
+      verdict: result.verdict
     };
     setLabHistory((items) => [nextItem, ...items]);
   }
@@ -2365,8 +2419,6 @@ function App() {
           }}
           scan={leftScan}
           active={Boolean(leftPose?.landmarks?.length)}
-          comment={leftComment}
-          onCommentChange={setLeftComment}
           showAnalysisRange
           analysisRange={leftAnalysisRange}
           mediaPipeSettings={mediaPipeSettings}
@@ -2399,8 +2451,6 @@ function App() {
           }}
           scan={rightScan}
           active={Boolean(rightPose?.landmarks?.length)}
-          comment={rightComment}
-          onCommentChange={setRightComment}
           mediaPipeSettings={mediaPipeSettings}
         />
       </section>
@@ -2512,7 +2562,7 @@ function App() {
         history={labHistory}
         expectedScore={expectedScore}
         onExpectedScoreChange={setExpectedScore}
-        onSave={saveLabExample}
+        onSave={() => saveLabExample(null, sync, "manual")}
         onExport={() => downloadJson("dmpa-lab-history.json", labHistory)}
         onClear={clearLabHistory}
         canSave={Boolean(runState.result?.ready)}
