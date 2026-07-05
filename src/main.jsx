@@ -119,6 +119,35 @@ const poseLandmarkCatalog = [
   "носок правой стопы"
 ];
 
+const poseConnections = [
+  [11, 12],
+  [11, 13],
+  [13, 15],
+  [15, 17],
+  [15, 19],
+  [15, 21],
+  [17, 19],
+  [12, 14],
+  [14, 16],
+  [16, 18],
+  [16, 20],
+  [16, 22],
+  [18, 20],
+  [11, 23],
+  [12, 24],
+  [23, 24],
+  [23, 25],
+  [25, 27],
+  [27, 29],
+  [27, 31],
+  [29, 31],
+  [24, 26],
+  [26, 28],
+  [28, 30],
+  [28, 32],
+  [30, 32]
+];
+
 const angleSpecs = [
   { id: "leftElbow", title: "Левый локоть", points: [11, 13, 15], weight: 1, region: "arms" },
   { id: "rightElbow", title: "Правый локоть", points: [12, 14, 16], weight: 1, region: "arms" },
@@ -1942,7 +1971,7 @@ function drawNormalizedSkeleton(ctx, landmarks, width, height, color, regions) {
   ctx.fillStyle = color;
   ctx.lineWidth = 2;
 
-  for (const [a, b] of PoseLandmarker.POSE_CONNECTIONS) {
+  for (const [a, b] of poseConnections) {
     if (!ids.has(a) || !ids.has(b) || !landmarks[a] || !landmarks[b]) continue;
     const pa = project(landmarks[a]);
     const pb = project(landmarks[b]);
