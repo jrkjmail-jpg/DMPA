@@ -986,6 +986,14 @@ function formatMetricValue(value, unit) {
   return `${value}°`;
 }
 
+function activeRegionLabels(regions = defaultMediaPipeSettings.regions) {
+  const labels = [];
+  if (regions?.arms) labels.push("руки");
+  if (regions?.torso) labels.push("корпус");
+  if (regions?.legs) labels.push("ноги");
+  return labels.length ? labels : ["все области"];
+}
+
 const VideoPane = forwardRef(function VideoPane(
   {
     title,
@@ -1706,8 +1714,27 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
                 {item.score}% схожесть{item.expectedScore !== null ? ` / ожидалось ${item.expectedScore}%` : ""}
               </strong>
               <span>{new Date(item.createdAt).toLocaleString()}</span>
+              <div className="history-tags">
+                <b>{comparisonModels[item.comparisonModel]?.title || "Углы"}</b>
+                <b>{item.mediaPipeSettings?.modelVariant || "lite"}</b>
+                <b>{item.mediaPipeSettings?.landmarkSet === "full33" ? "33 точки" : "13 точек"}</b>
+                <b>{item.metrics?.framesCompared || 0} кадров</b>
+              </div>
               <p>
                 Эталон: {item.leftComment || "без комментария"} | Правое: {item.rightComment || "без комментария"}
+              </p>
+              <p>
+                Метрики: лучший {item.metrics?.bestScore ?? "-"}%, худший {item.metrics?.worstScore ?? "-"}%, длительность{" "}
+                {item.metrics?.durationCompared ?? "-"} сек, аудио-смещение {item.sync?.ready ? `${item.sync.offsetSeconds} сек` : "нет"}.
+              </p>
+              {item.expectedScore !== null && (
+                <p>
+                  Ошибка модели относительно ожидания: {Math.abs(item.score - item.expectedScore)} п.п.
+                </p>
+              )}
+              <p>
+                Области: {activeRegionLabels(item.mediaPipeSettings?.regions).join(", ")}. FPS скана:{" "}
+                {item.mediaPipeSettings?.scanFps || "-"}.
               </p>
               <p>
                 Скелеты: {item.skeletons?.left?.frames?.length || 0} кадров эталона,{" "}
@@ -1828,31 +1855,44 @@ function drawWave(ctx, waveform, width, height, color, offsetSeconds) {
 
 function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) {
   const canvasRef = useRef(null);
-  const frameRef = useRef(0);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
   const pairs = useMemo(() => {
     if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
     const allPairs = synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
     const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
     return allPairs.filter((_, index) => index % stride === 0);
   }, [enabled, leftScan, rightScan, sync]);
+  const pair = pairs[currentIndex] || null;
+
+  useEffect(() => {
+    setCurrentIndex(0);
+    setIsPlaying(false);
+  }, [pairs.length]);
+
+  useEffect(() => {
+    if (!enabled || !isPlaying || pairs.length < 2) return undefined;
+    const timer = window.setInterval(() => {
+      setCurrentIndex((index) => (index + 1) % pairs.length);
+    }, 140);
+    return () => window.clearInterval(timer);
+  }, [enabled, isPlaying, pairs.length]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !pairs.length) return undefined;
+    if (!canvas) return;
     const dpr = window.devicePixelRatio || 1;
-    let index = 0;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = "#101827";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    drawSkeletonGrid(ctx, rect.width, rect.height);
 
-    function draw() {
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-      canvas.height = Math.max(1, Math.floor(rect.height * dpr));
-      const ctx = canvas.getContext("2d");
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, rect.width, rect.height);
-      ctx.fillStyle = "#101827";
-      ctx.fillRect(0, 0, rect.width, rect.height);
-      drawSkeletonGrid(ctx, rect.width, rect.height);
-      const pair = pairs[index % pairs.length];
+    if (pair) {
       const left = normalizeSkeleton(pair.leftFrame.landmarks);
       const right = normalizeSkeleton(pair.rightFrame.landmarks);
       drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
@@ -1860,13 +1900,14 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
       ctx.fillStyle = "#d8e8fa";
       ctx.font = "700 13px Inter, sans-serif";
       ctx.fillText(`Эталон ${pair.leftTime.toFixed(1)}с / правое ${pair.rightTime.toFixed(1)}с`, 14, 24);
-      index += 1;
-      frameRef.current = requestAnimationFrame(draw);
+    } else {
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 15px Inter, sans-serif";
+      ctx.fillText("Сначала отсканируйте оба скелета", 14, 28);
     }
+  }, [pair, regions]);
 
-    draw();
-    return () => cancelAnimationFrame(frameRef.current);
-  }, [pairs, regions]);
+  const frameScore = pair ? compareOverlayFrames(pair.leftFrame, pair.rightFrame, regions).score : null;
 
   return (
     <section className={`skeleton-lab ${enabled ? "" : "hidden"}`}>
@@ -1885,6 +1926,42 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
         </div>
       </div>
       <canvas ref={canvasRef} className="skeleton-canvas" />
+      <div className="overlay-controls">
+        <button type="button" onClick={() => setIsPlaying((value) => !value)} disabled={!pairs.length}>
+          {isPlaying ? <Pause size={17} /> : <Play size={17} />}
+          {isPlaying ? "Пауза" : "Play"}
+        </button>
+        <button type="button" onClick={() => setCurrentIndex((index) => Math.max(0, index - 1))} disabled={!pairs.length}>
+          Назад
+        </button>
+        <input
+          type="range"
+          min="0"
+          max={Math.max(0, pairs.length - 1)}
+          step="1"
+          value={Math.min(currentIndex, Math.max(0, pairs.length - 1))}
+          onChange={(event) => {
+            setIsPlaying(false);
+            setCurrentIndex(Number(event.target.value));
+          }}
+          disabled={!pairs.length}
+        />
+        <button
+          type="button"
+          onClick={() => setCurrentIndex((index) => Math.min(Math.max(0, pairs.length - 1), index + 1))}
+          disabled={!pairs.length}
+        >
+          Вперед
+        </button>
+      </div>
+      <div className="overlay-meta">
+        <span>
+          Кадр {pairs.length ? currentIndex + 1 : 0}/{pairs.length}
+        </span>
+        <span>Эталон: {pair ? `${pair.leftTime.toFixed(2)} сек` : "-"}</span>
+        <span>Правое: {pair ? `${pair.rightTime.toFixed(2)} сек` : "-"}</span>
+        <span>Схожесть кадра: {frameScore != null ? `${frameScore}%` : "-"}</span>
+      </div>
       <p className="sync-note">
         Здесь оба скелета центрируются по корпусу и приводятся к одному масштабу. Чем меньше расстояние между точками, тем выше оценка
         наложения.
@@ -2180,6 +2257,7 @@ function App() {
       expectedScore: expectedScore === "" ? null : Number(expectedScore),
       score: runState.result.score,
       comparisonModel,
+      comparisonModelDetails: comparisonModels[comparisonModel],
       mediaPipeSettings: {
         ...mediaPipeSettings,
         activeAngles: activeSpecs.map((spec) => ({

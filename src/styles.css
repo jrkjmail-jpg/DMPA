@@ -552,6 +552,33 @@ h3 {
   width: 100%;
 }
 
+.overlay-controls {
+  align-items: center;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: auto auto minmax(160px, 1fr) auto;
+  margin-top: 12px;
+}
+
+.overlay-controls button {
+  min-height: 38px;
+  padding: 8px 12px;
+}
+
+.overlay-controls input[type="range"] {
+  width: 100%;
+}
+
+.overlay-meta {
+  color: #52677c;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 8px 14px;
+  margin-top: 10px;
+}
+
 .skeleton-left {
   background: #28d7a4;
 }
@@ -909,6 +936,22 @@ h3 {
   margin-top: 4px;
 }
 
+.history-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.history-tags b {
+  background: #edf3fa;
+  border: 1px solid #dbe4ef;
+  border-radius: 999px;
+  color: #3f5062;
+  font-size: 12px;
+  padding: 5px 9px;
+}
+
 .history-item p,
 .empty-history {
   color: #3f5062;
@@ -965,9 +1008,14 @@ h3 {
   }
 
   .range-header,
-  .range-actions {
+  .range-actions,
+  .overlay-controls {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .overlay-controls {
+    display: flex;
   }
 
   .camera-permission,
