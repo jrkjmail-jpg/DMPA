@@ -61,8 +61,8 @@ const comparisonModels = {
 };
 
 const comparisonModelKey = "dmpa.comparison.model.v1";
-const maxScanFrames = 720;
-const mobileMaxScanFrames = 220;
+const maxScanFrames = 3600;
+const mobileMaxScanFrames = 1200;
 const maxOverlayPreviewFrames = 240;
 
 const landmarkNames = {
@@ -794,8 +794,7 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
   const mobileSafe = isMemoryConstrainedDevice();
   const frameBudget = mobileSafe ? mobileMaxScanFrames : maxScanFrames;
   const requestedFps = Math.max(1, Number(settings.scanFps || defaultMediaPipeSettings.scanFps));
-  const effectiveFps = mobileSafe ? Math.min(requestedFps, 3) : requestedFps;
-  const requestedStep = 1 / effectiveFps;
+  const requestedStep = 1 / requestedFps;
   const step = Math.max(requestedStep, scanDuration / frameBudget);
   const specs = activeAngleSpecs(settings.regions);
   const frames = [];
@@ -837,8 +836,12 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
     duration,
     range: { start: scanStart, end: scanEnd },
     settings: {
+      modelVariant: settings.modelVariant,
+      delegate: settings.delegate,
       scanFps: settings.scanFps,
       effectiveScanFps: Number((1 / step).toFixed(2)),
+      requestedFrames: Math.ceil(scanDuration * requestedFps),
+      frameBudget,
       scannedFrames,
       mobileSafe,
       landmarkSet: settings.landmarkSet,
@@ -1413,15 +1416,18 @@ const VideoPane = forwardRef(function VideoPane(
           <RotateCcw size={18} />
           Сброс
         </button>
-        <button type="button" className="scan-button" onClick={scanSkeleton} disabled={isScanning}>
+        <button type="button" className="scan-button" onClick={scanSkeleton} disabled={isScanning || !scanLandmarker}>
           <Wand2 size={18} />
-          {isScanning ? `${scanProgress}%` : "Сканировать скелет"}
+          {isScanning ? `${scanProgress}%` : scanLandmarker ? "Сканировать скелет" : "MediaPipe загружается"}
         </button>
       </div>
 
       <div className="scan-meta">
         <span>Данные позы: {scan?.frames?.length ? `${scan.frames.length} точек таймлайна` : "не сохранены"}</span>
         <span>Точность: {scan?.averageConfidence ? `${Math.round(scan.averageConfidence * 100)}%` : "-"}</span>
+        <span>
+          Скан: {scan?.settings ? `${scan.settings.modelVariant} / ${scan.settings.effectiveScanFps} fps / ${scan.settings.landmarkSet}` : "-"}
+        </span>
       </div>
       <label className="video-comment">
         Комментарий для датасета
