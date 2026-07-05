@@ -61,6 +61,8 @@ const comparisonModels = {
 };
 
 const comparisonModelKey = "dmpa.comparison.model.v1";
+const maxScanFrames = 720;
+const maxOverlayPreviewFrames = 240;
 
 const landmarkNames = {
   0: "нос",
@@ -740,7 +742,8 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
   const scanStart = Math.max(0, Math.min(range?.start ?? 0, duration));
   const scanEnd = Math.max(scanStart, Math.min(range?.end ?? duration, duration));
   const scanDuration = Math.max(0.01, scanEnd - scanStart);
-  const step = 1 / Math.max(1, Number(settings.scanFps || defaultMediaPipeSettings.scanFps));
+  const requestedStep = 1 / Math.max(1, Number(settings.scanFps || defaultMediaPipeSettings.scanFps));
+  const step = Math.max(requestedStep, scanDuration / maxScanFrames);
   const specs = activeAngleSpecs(settings.regions);
   const frames = [];
 
@@ -1761,7 +1764,9 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
   const frameRef = useRef(0);
   const pairs = useMemo(() => {
     if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
-    return synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
+    const allPairs = synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
+    const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
+    return allPairs.filter((_, index) => index % stride === 0);
   }, [enabled, leftScan, rightScan, sync]);
 
   useEffect(() => {
@@ -1949,13 +1954,9 @@ function App() {
     if (comparisonModel === "overlay") return compareOverlayFrames(leftPose, rightPose, mediaPipeSettings.regions);
     return comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions);
   }, [comparisonModel, leftPose, rightPose, mediaPipeSettings.regions]);
-  const scanComparison = useMemo(
-    () => compareByModel(comparisonModel, leftScan, rightScan, sync, mediaPipeSettings.regions, leftAudio),
-    [comparisonModel, leftScan, rightScan, sync, mediaPipeSettings.regions, leftAudio]
-  );
   const comparison = runState.result || (leftScan?.frames?.length && rightScan?.frames?.length ? pendingFullRunComparison() : liveComparison);
   const confidence = Math.round(
-    scanComparison.ready
+    leftScan?.frames?.length || rightScan?.frames?.length
       ? ((leftScan?.averageConfidence || 0) + (rightScan?.averageConfidence || 0)) * 50
       : ((leftPose?.confidence || 0) + (rightPose?.confidence || 0)) * 50
   );
