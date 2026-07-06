@@ -57,7 +57,7 @@ test("dance against a standing person is not scored as highly similar", () => {
   const reference = makeSequence();
   const user = makeSequence({ freeze: true });
   const result = compareSkeletons_2026_07_06(reference, user);
-  assert.ok(result.finalScore <= 55, `expected <= 55, got ${result.finalScore}`);
+  assert.ok(result.finalScore <= 25, `expected <= 25, got ${result.finalScore}`);
   assert.ok(result.activityScore <= 45, `expected low activity score, got ${result.activityScore}`);
   assert.equal(result.diagnostics.activity.staticMismatch, true);
 });
@@ -66,7 +66,15 @@ test("dance against a standing person with tracking jitter stays low", () => {
   const reference = makeSequence();
   const user = makeSequence({ freeze: true, jitter: 0.025 });
   const result = compareSkeletons_2026_07_06(reference, user);
-  assert.ok(result.finalScore <= 55, `expected <= 55, got ${result.finalScore}`);
+  assert.ok(result.finalScore <= 30, `expected <= 30, got ${result.finalScore}`);
+  assert.equal(result.diagnostics.motionRange.staticRangeMismatch, true);
+});
+
+test("dance against a standing person with stronger tracking jitter stays low", () => {
+  const reference = makeSequence();
+  const user = makeSequence({ freeze: true, jitter: 0.055 });
+  const result = compareSkeletons_2026_07_06(reference, user);
+  assert.ok(result.finalScore <= 45, `expected <= 45, got ${result.finalScore}`);
   assert.equal(result.diagnostics.motionRange.staticRangeMismatch, true);
 });
 

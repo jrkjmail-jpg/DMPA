@@ -457,19 +457,28 @@ function activityGateFor(frameResults, activityScore) {
 function motionRangeGateFor(frameResults) {
   const referenceRange = sequenceMotionRange(frameResults, "referenceJoints");
   const userRange = sequenceMotionRange(frameResults, "userJoints");
-  const rangeRatio = referenceRange > 0 ? userRange / referenceRange : 1;
-  const rangeScore = clampScore(Math.min(rangeRatio, referenceRange > 0 ? referenceRange / Math.max(userRange, 0.0001) : 1) * 100);
-  const referenceIsDynamic = referenceRange >= 0.12;
-  const userRangeTooSmall = userRange < referenceRange * 0.55;
-  const finalCap = referenceIsDynamic && userRangeTooSmall ? 22 + rangeScore * 0.45 : 100;
+  const referenceEffectiveRange = effectiveDanceRange(referenceRange);
+  const userEffectiveRange = effectiveDanceRange(userRange);
+  const rangeRatio = referenceEffectiveRange > 0 ? userEffectiveRange / referenceEffectiveRange : 1;
+  const rangeScore = clampScore(Math.min(rangeRatio, referenceEffectiveRange > 0 ? referenceEffectiveRange / Math.max(userEffectiveRange, 0.0001) : 1) * 100);
+  const referenceIsDynamic = referenceEffectiveRange >= 0.07;
+  const userRangeTooSmall = userEffectiveRange < referenceEffectiveRange * 0.75;
+  const finalCap = referenceIsDynamic && userRangeTooSmall ? 6 + rangeScore * 0.28 : 100;
   return {
     referenceRange: Number(referenceRange.toFixed(4)),
     userRange: Number(userRange.toFixed(4)),
+    referenceEffectiveRange: Number(referenceEffectiveRange.toFixed(4)),
+    userEffectiveRange: Number(userEffectiveRange.toFixed(4)),
     rangeRatio: Number(rangeRatio.toFixed(3)),
     staticRangeMismatch: referenceIsDynamic && userRangeTooSmall,
     rangeScore,
     finalCap: clampScore(finalCap)
   };
+}
+
+function effectiveDanceRange(rawRange) {
+  const trackingNoiseFloor = 0.04;
+  return Math.max(0, rawRange - trackingNoiseFloor);
 }
 
 function sequenceMotionRange(frameResults, key) {
