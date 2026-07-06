@@ -55,6 +55,14 @@ test("missing joint does not break calculation and appears in diagnostics", () =
   assert.ok(result.diagnostics.confidence < 100, `expected confidence penalty, got ${result.diagnostics.confidence}`);
 });
 
+test("worst moment keeps UI-compatible time fields", () => {
+  const reference = makeSequence();
+  const user = makeSequence({ wrongLegs: true });
+  const result = compareSkeletons_2026_07_06(reference, user);
+  assert.equal(typeof result.worstMoment.leftTime, "number");
+  assert.equal(typeof result.worstMoment.rightTime, "number");
+});
+
 function makeSequence(options = {}) {
   const frames = [0, 200, 400, 600, 800, 1000].map((timestamp) => ({
     timestamp: timestamp + (options.delayMs || 0),

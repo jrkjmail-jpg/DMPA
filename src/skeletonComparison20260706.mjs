@@ -498,9 +498,13 @@ function emptyResult20260706(options, message) {
 
 function worstMomentFor(frame) {
   if (!frame) return null;
+  const leftTime = Number(((frame.referenceTimeMs || 0) / 1000).toFixed(2));
+  const rightTime = Number.isFinite(frame.userTimeMs) ? Number((frame.userTimeMs / 1000).toFixed(2)) : null;
   return {
-    referenceTime: Number(((frame.referenceTimeMs || 0) / 1000).toFixed(2)),
-    userTime: Number.isFinite(frame.userTimeMs) ? Number((frame.userTimeMs / 1000).toFixed(2)) : null,
+    leftTime,
+    rightTime,
+    referenceTime: leftTime,
+    userTime: rightTime,
     score: clampScore(frame.frameScore),
     timeOffsetMs: Math.round(frame.timeOffsetMs || 0)
   };
