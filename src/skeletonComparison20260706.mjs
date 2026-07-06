@@ -112,14 +112,23 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
   const angleScore = average(frameResults.map((item) => item.angleScore));
   const velocityScore = average(frameResults.map((item) => item.velocityScore));
   const activityScore = aggregateActivityScore(frameResults);
+  const trajectoryScore = trajectoryScoreFor(frameResults);
   const motionScore = normalizedOptions.compareVelocity
-    ? angleScore * 0.45 + velocityScore * 0.3 + activityScore * 0.25
+    ? angleScore * 0.35 + velocityScore * 0.2 + activityScore * 0.2 + trajectoryScore * 0.25
     : angleScore;
   const timingScore = average(frameResults.map((item) => item.timingScore));
-  const baseFinalScore = clampScore(poseScore * 0.4 + boneDirectionScore * 0.25 + motionScore * 0.2 + timingScore * 0.15);
   const activityGate = activityGateFor(frameResults, activityScore);
   const motionRangeGate = motionRangeGateFor(frameResults);
-  const finalScore = clampScore(Math.min(baseFinalScore, activityGate.finalCap, motionRangeGate.finalCap));
+  const evidence = evidenceScoresFor({
+    poseScore,
+    boneDirectionScore,
+    angleScore,
+    activityScore,
+    trajectoryScore,
+    timingScore,
+    motionRangeScore: motionRangeGate.rangeScore
+  });
+  const finalScore = evidence.finalScore;
   const bodyParts = bodyPartScores(frameResults);
   const worstFrame = frameResults.reduce((worst, item) => (item.frameScore < worst.frameScore ? item : worst), frameResults[0]);
   const weakPoints = weakPointsFor({
@@ -128,11 +137,13 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
     angleScore,
     velocityScore,
     activityScore,
+    trajectoryScore,
     timingScore,
     bodyParts,
     missingJoints,
     activityGate,
-    motionRangeGate
+    motionRangeGate,
+    evidence
   });
 
   return {
@@ -147,6 +158,7 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
     angleScore: clampScore(angleScore),
     velocityScore: clampScore(velocityScore),
     activityScore: clampScore(activityScore),
+    trajectoryScore: clampScore(trajectoryScore),
     bodyParts,
     diagnostics: {
       averageTimeOffsetMs: Math.round(average(frameResults.map((item) => Math.abs(item.timeOffsetMs)))),
@@ -155,9 +167,11 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
       missingJoints: Array.from(missingJoints.entries()).map(([joint, count]) => ({ joint, frames: count })),
       confidence: confidenceFor(frameResults, missingJoints.size),
       activity: activityGate,
-      motionRange: motionRangeGate
+      motionRange: motionRangeGate,
+      evidence,
+      trajectoryScore: clampScore(trajectoryScore)
     },
-    rows: rowsForResult({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, timingScore, bodyParts }),
+    rows: rowsForResult({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, trajectoryScore, timingScore, bodyParts }),
     suggestions: weakPoints,
     framesCompared: frameResults.length,
     bestScore: clampScore(Math.max(...frameResults.map((item) => item.frameScore))),
@@ -481,6 +495,61 @@ function effectiveDanceRange(rawRange) {
   return Math.max(0, rawRange - trackingNoiseFloor);
 }
 
+function evidenceScoresFor({ poseScore, boneDirectionScore, angleScore, activityScore, trajectoryScore, timingScore, motionRangeScore }) {
+  const postureEvidence = clampScore(poseScore * 0.35 + boneDirectionScore * 0.25 + angleScore * 0.4);
+  const motionEvidence = motionEvidenceFor({ motionRangeScore, activityScore, trajectoryScore });
+  const rawScore = clampScore(postureEvidence * 0.45 + motionEvidence * 0.4 + timingScore * 0.15);
+  const compensationCeiling = compensationCeilingFor(postureEvidence, motionEvidence);
+  return {
+    postureEvidence,
+    motionEvidence,
+    compensationCeiling,
+    rawScore,
+    finalScore: clampScore(Math.min(rawScore, compensationCeiling))
+  };
+}
+
+function motionEvidenceFor({ motionRangeScore, activityScore, trajectoryScore }) {
+  const motionQuantity = clampScore(motionRangeScore * 0.6 + activityScore * 0.4);
+  const weakMotionEvidence = Math.min(motionQuantity, trajectoryScore);
+  const strongMotionEvidence = Math.max(motionQuantity, trajectoryScore);
+  return clampScore(weakMotionEvidence + (strongMotionEvidence - weakMotionEvidence) * 0.25);
+}
+
+function compensationCeilingFor(postureEvidence, motionEvidence) {
+  const weakEvidence = Math.min(postureEvidence, motionEvidence);
+  const strongEvidence = Math.max(postureEvidence, motionEvidence);
+  if (weakEvidence < 50) return weakEvidence;
+  return clampScore(weakEvidence + (strongEvidence - weakEvidence) * 0.35);
+}
+
+function trajectoryScoreFor(frameResults) {
+  const trajectoryJoints = ["leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftKnee", "rightKnee", "leftAnkle", "rightAnkle"];
+  const scores = [];
+  for (let index = 1; index < frameResults.length; index += 1) {
+    const previous = frameResults[index - 1];
+    const current = frameResults[index];
+    for (const joint of trajectoryJoints) {
+      const referenceDelta = delta(previous.referenceJoints?.[joint], current.referenceJoints?.[joint]);
+      const userDelta = delta(previous.userJoints?.[joint], current.userJoints?.[joint]);
+      if (!referenceDelta || length(referenceDelta) < 0.012) continue;
+      if (!userDelta || length(userDelta) < 0.006) {
+        scores.push(0);
+        continue;
+      }
+      const directionScore = clampScore(((dot(normalize(referenceDelta), normalize(userDelta)) + 1) / 2) * 100);
+      const amplitudeScore = activityRatioScore(length(referenceDelta), length(userDelta));
+      scores.push(directionScore * 0.7 + amplitudeScore * 0.3);
+    }
+  }
+  return scores.length ? clampScore(average(scores)) : 100;
+}
+
+function delta(a, b) {
+  if (!a || !b) return null;
+  return { x: b.x - a.x, y: b.y - a.y, z: (b.z || 0) - (a.z || 0) };
+}
+
 function sequenceMotionRange(frameResults, key) {
   const rangeJoints = ["leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftKnee", "rightKnee", "leftAnkle", "rightAnkle"];
   const ranges = [];
@@ -556,6 +625,7 @@ function rowsForResult(result) {
     { id: "2026-angles", title: "06.07.2026: углы суставов", leftValue: result.angleScore, rightValue: 100, diff: 100 - result.angleScore, unit: "%", score: result.angleScore },
     { id: "2026-motion", title: "06.07.2026: скорость движения", leftValue: result.velocityScore, rightValue: 100, diff: 100 - result.velocityScore, unit: "%", score: result.velocityScore },
     { id: "2026-activity", title: "06.07.2026: энергия движения", leftValue: result.activityScore, rightValue: 100, diff: 100 - result.activityScore, unit: "%", score: result.activityScore },
+    { id: "2026-trajectory", title: "06.07.2026: траектория конечностей", leftValue: result.trajectoryScore, rightValue: 100, diff: 100 - result.trajectoryScore, unit: "%", score: result.trajectoryScore },
     { id: "2026-rhythm", title: "06.07.2026: ритм и синхронность", leftValue: result.timingScore, rightValue: 100, diff: 100 - result.timingScore, unit: "%", score: result.timingScore },
     ...Object.entries(result.bodyParts).map(([part, score]) => ({
       id: `2026-part-${part}`,
@@ -569,13 +639,15 @@ function rowsForResult(result) {
   ];
 }
 
-function weakPointsFor({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, timingScore, bodyParts, missingJoints, activityGate, motionRangeGate }) {
+function weakPointsFor({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, trajectoryScore, timingScore, bodyParts, missingJoints, activityGate, motionRangeGate, evidence }) {
   const weak = [];
   if (poseScore < 75) weak.push(`Относительная поза проседает до ${Math.round(poseScore)}%.`);
   if (boneDirectionScore < 75) weak.push(`Направления рук, ног или корпуса отличаются: ${Math.round(boneDirectionScore)}%.`);
   if (angleScore < 75) weak.push(`Углы суставов отличаются: ${Math.round(angleScore)}%.`);
   if (velocityScore < 75) weak.push(`Движение идет с другой скоростью или в другом направлении: ${Math.round(velocityScore)}%.`);
   if (activityScore < 70) weak.push(`Энергия движения не совпадает: ${Math.round(activityScore)}%.`);
+  if (trajectoryScore < 70) weak.push(`Траектории рук и ног отличаются: ${Math.round(trajectoryScore)}%.`);
+  if (evidence?.motionEvidence < 70) weak.push(`Недостаточно доказательств похожего движения: ${evidence.motionEvidence}%.`);
   if (activityGate?.staticMismatch) weak.push("Эталон активно движется, а правое видео почти статично, поэтому итоговая оценка ограничена.");
   if (motionRangeGate?.staticRangeMismatch) weak.push("Амплитуда движения справа намного меньше эталона: похоже на стояние вместо танца.");
   if (timingScore < 75) weak.push(`Есть заметное раннее или позднее движение: ${Math.round(timingScore)}%.`);
@@ -609,6 +681,7 @@ function emptyResult20260706(options, message) {
     motionScore: 0,
     timingScore: 0,
     activityScore: 0,
+    trajectoryScore: 0,
     bodyParts: { arms: 0, legs: 0, torso: 0, head: 0, rhythm: 0 },
     diagnostics: {
       averageTimeOffsetMs: 0,

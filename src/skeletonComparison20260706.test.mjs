@@ -78,6 +78,13 @@ test("dance against a standing person with stronger tracking jitter stays low", 
   assert.equal(result.diagnostics.motionRange.staticRangeMismatch, true);
 });
 
+test("different moving choreography does not score as a close match", () => {
+  const reference = makeSequence();
+  const user = makeSequence({ oppositeDance: true });
+  const result = compareSkeletons_2026_07_06(reference, user);
+  assert.ok(result.finalScore <= 65, `expected <= 65, got ${result.finalScore}`);
+});
+
 test("missing joint does not break calculation and appears in diagnostics", () => {
   const reference = makeSequence();
   const user = makeSequence();
@@ -112,6 +119,8 @@ function makePose(seconds, options = {}) {
   const offsetY = options.offsetY || 0;
   const lift = Math.sin(seconds * Math.PI * 1.5) * 0.22;
   const legMove = Math.cos(seconds * Math.PI) * 0.08;
+  const armDirection = options.oppositeDance ? -1 : 1;
+  const legDirection = options.oppositeDance ? -1 : 1;
 
   const pelvis = p(0, 0);
   const neck = p(0, -1.05);
@@ -119,14 +128,14 @@ function makePose(seconds, options = {}) {
   const rightShoulder = p(0.38, -0.95);
   const leftHip = p(-0.26, 0.05);
   const rightHip = p(0.26, 0.05);
-  const leftElbow = p(-0.64 * armScale, -0.7 - lift);
-  const rightElbow = p(0.64 * armScale, -0.7 + lift * 0.75);
-  const leftWrist = p(-0.85 * armScale, -0.45 - lift * 1.7);
-  const rightWrist = p(0.85 * armScale, -0.45 + lift * 1.35);
+  const leftElbow = p(-0.64 * armScale, -0.7 - lift * armDirection);
+  const rightElbow = p(0.64 * armScale, -0.7 + lift * 0.75 * armDirection);
+  const leftWrist = p(-0.85 * armScale, -0.45 - lift * 1.7 * armDirection);
+  const rightWrist = p(0.85 * armScale, -0.45 + lift * 1.35 * armDirection);
   const leftKnee = p(options.wrongLegs ? -0.65 : -0.28, 0.72 * legScale + legMove);
-  const rightKnee = p(options.wrongLegs ? 0.65 : 0.28, 0.72 * legScale - legMove * 0.4);
-  const leftAnkle = p(options.wrongLegs ? -0.82 : -0.32, 1.36 * legScale + legMove * 0.8);
-  const rightAnkle = p(options.wrongLegs ? 0.82 : 0.32, 1.36 * legScale - legMove * 0.35);
+  const rightKnee = p(options.wrongLegs ? 0.65 : 0.28, 0.72 * legScale - legMove * 0.4 * legDirection);
+  const leftAnkle = p(options.wrongLegs ? -0.82 : -0.32, 1.36 * legScale + legMove * 0.8 * legDirection);
+  const rightAnkle = p(options.wrongLegs ? 0.82 : 0.32, 1.36 * legScale - legMove * 0.35 * legDirection);
 
   return {
     pelvis,
