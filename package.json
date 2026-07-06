@@ -1,6 +1,7 @@
 {
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "test": "node --test src/*.test.mjs",
     "build": "vite build",
     "deploy": "wrangler deploy",
     "preview": "vite preview --host 127.0.0.1"
