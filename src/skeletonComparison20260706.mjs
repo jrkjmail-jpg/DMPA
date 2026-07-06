@@ -63,6 +63,13 @@ const bodyPartJoints = {
   head: ["neck", "head"]
 };
 
+const jointPositionPenaltyByPart = {
+  arms: 90,
+  legs: 220,
+  torso: 90,
+  head: 90
+};
+
 export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, options = {}) {
   const normalizedOptions = {
     ...defaultOptions20260706,
@@ -110,6 +117,7 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
   const timingScore = average(frameResults.map((item) => item.timingScore));
   const finalScore = clampScore(poseScore * 0.4 + boneDirectionScore * 0.25 + motionScore * 0.2 + timingScore * 0.15);
   const bodyParts = bodyPartScores(frameResults);
+  const worstFrame = frameResults.reduce((worst, item) => (item.frameScore < worst.frameScore ? item : worst), frameResults[0]);
   const weakPoints = weakPointsFor({
     poseScore,
     boneDirectionScore,
@@ -145,6 +153,7 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
     bestScore: clampScore(Math.max(...frameResults.map((item) => item.frameScore))),
     worstScore: clampScore(Math.min(...frameResults.map((item) => item.frameScore))),
     durationCompared: Number(((preparedReference.at(-1).timestampMs - preparedReference[0].timestampMs) / 1000).toFixed(1)),
+    worstMoment: worstMomentFor(worstFrame),
     verdict: verdict20260706(finalScore, weakPoints)
   };
 }
@@ -262,6 +271,8 @@ function comparePreparedFrames(referenceFrame, userFrame, options) {
 
   return {
     frameScore,
+    referenceTimeMs: referenceFrame.timestampMs,
+    userTimeMs: userFrame.timestampMs,
     poseScore: pose.score,
     boneDirectionScore: bone.score,
     angleScore: angles.score,
@@ -276,6 +287,8 @@ function comparePreparedFrames(referenceFrame, userFrame, options) {
 function unmatchedFrameResult(referenceFrame, options) {
   return {
     frameScore: 0,
+    referenceTimeMs: referenceFrame.timestampMs,
+    userTimeMs: null,
     poseScore: 0,
     boneDirectionScore: 0,
     angleScore: 0,
@@ -299,11 +312,26 @@ function compareJointPositions(left, right) {
         missingJoints.push(joint);
         continue;
       }
-      scores.push(clampScore(100 - distance(a, b) * 90));
+      scores.push(clampScore(100 - distance(a, b) * (jointPositionPenaltyByPart[part] || 90)));
+    }
+    if (part === "legs") {
+      scores.push(...bilateralWidthScores(left, right, [
+        ["leftKnee", "rightKnee"],
+        ["leftAnkle", "rightAnkle"]
+      ]));
     }
     parts[part] = averageOrNull(scores);
   }
   return componentFromParts(parts, missingJoints);
+}
+
+function bilateralWidthScores(left, right, pairs) {
+  return pairs
+    .map(([a, b]) => {
+      if (!left[a] || !left[b] || !right[a] || !right[b]) return null;
+      return clampScore(100 - Math.abs(distance(left[a], left[b]) - distance(right[a], right[b])) * 320);
+    })
+    .filter(Number.isFinite);
 }
 
 function compareBoneDirections(left, right) {
@@ -381,11 +409,13 @@ function bodyPartScores(frameResults) {
 function mergeBodyPartComponents(components) {
   const result = {};
   for (const part of ["arms", "legs", "torso", "head"]) {
-    result[part] = average(
-      components
-        .map((component) => component[part])
-        .filter(Number.isFinite)
-    );
+    const values = components.map((component) => component[part]).filter(Number.isFinite);
+    if (!values.length) {
+      result[part] = 0;
+      continue;
+    }
+    const weakestSignal = Math.min(...values);
+    result[part] = average(values) * 0.35 + weakestSignal * 0.65;
   }
   return result;
 }
@@ -458,7 +488,21 @@ function emptyResult20260706(options, message) {
     rows: [],
     suggestions: [message],
     framesCompared: 0,
+    bestScore: 0,
+    worstScore: 0,
+    durationCompared: 0,
+    worstMoment: null,
     verdict: message
+  };
+}
+
+function worstMomentFor(frame) {
+  if (!frame) return null;
+  return {
+    referenceTime: Number(((frame.referenceTimeMs || 0) / 1000).toFixed(2)),
+    userTime: Number.isFinite(frame.userTimeMs) ? Number((frame.userTimeMs / 1000).toFixed(2)) : null,
+    score: clampScore(frame.frameScore),
+    timeOffsetMs: Math.round(frame.timeOffsetMs || 0)
   };
 }
 
