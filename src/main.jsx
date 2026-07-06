@@ -16,6 +16,9 @@ import "./styles.css";
 const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
 const labHistoryKey = "dmpa.lab.history.v1";
 const mediaPipeSettingsKey = "dmpa.mediapipe.settings.v1";
+const maxStoredLabItems = 20;
+const maxStoredSkeletonFrames = 80;
+const maxStoredAngleRows = 60;
 
 const modelUrls = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
@@ -1525,9 +1528,61 @@ function MetricCard({ label, value }) {
 
 function loadLabHistory() {
   try {
-    return JSON.parse(localStorage.getItem(labHistoryKey) || "[]");
+    return compactLabHistory(JSON.parse(localStorage.getItem(labHistoryKey) || "[]"));
   } catch {
     return [];
+  }
+}
+
+function compactLabHistory(items, options = {}) {
+  const maxItems = options.maxItems ?? maxStoredLabItems;
+  const includeSkeletons = options.includeSkeletons ?? true;
+  return (Array.isArray(items) ? items : []).slice(0, maxItems).map((item) => compactLabHistoryItem(item, includeSkeletons));
+}
+
+function compactLabHistoryItem(item, includeSkeletons = true) {
+  return {
+    ...item,
+    angleRows: sampleEvenly(item?.angleRows || [], maxStoredAngleRows),
+    suggestions: (item?.suggestions || []).slice(0, 8),
+    skeletons: includeSkeletons ? compactSkeletonBundle(item?.skeletons) : null
+  };
+}
+
+function compactSkeletonBundle(skeletons) {
+  if (!skeletons) return null;
+  return {
+    left: compactStoredSkeleton(skeletons.left),
+    right: compactStoredSkeleton(skeletons.right),
+    synchronizedPairs: sampleEvenly(skeletons.synchronizedPairs || [], maxStoredSkeletonFrames)
+  };
+}
+
+function compactStoredSkeleton(skeleton) {
+  if (!skeleton) return null;
+  const frames = sampleEvenly(skeleton.frames || [], maxStoredSkeletonFrames);
+  return {
+    ...skeleton,
+    storedFrames: frames.length,
+    frames
+  };
+}
+
+function saveLabHistoryToStorage(history) {
+  const compact = compactLabHistory(history);
+  try {
+    localStorage.setItem(labHistoryKey, JSON.stringify(compact));
+    return compact;
+  } catch (err) {
+    const tiny = compactLabHistory(history, { maxItems: 8, includeSkeletons: false });
+    try {
+      localStorage.setItem(labHistoryKey, JSON.stringify(tiny));
+      return tiny;
+    } catch {
+      console.warn("Не удалось сохранить историю лаборатории: quota exceeded.", err);
+      localStorage.removeItem(labHistoryKey);
+      return [];
+    }
   }
 }
 
@@ -1711,28 +1766,34 @@ function serializeLandmarks(landmarks, landmarkSet = "core13") {
 
 function serializeScanSkeleton(scan, settings = defaultMediaPipeSettings) {
   if (!scan?.frames?.length) return null;
+  const frames = sampleEvenly(
+    scan.frames.filter((frame) => frame.landmarks?.length),
+    maxStoredSkeletonFrames
+  );
   return {
     duration: scan.duration,
     range: scan.range || null,
     trackedFrames: scan.trackedFrames,
+    storedFrames: frames.length,
     averageConfidence: Number((scan.averageConfidence || 0).toFixed(4)),
     landmarkSet: settings.landmarkSet,
-    frames: scan.frames
-      .filter((frame) => frame.landmarks?.length)
-      .map((frame) => ({
-        time: frame.time,
-        confidence: Number((frame.confidence || 0).toFixed(4)),
-        angles: frame.angles,
-        landmarks: serializeLandmarks(frame.landmarks, settings.landmarkSet)
-      }))
+    frames: frames.map((frame) => ({
+      time: frame.time,
+      confidence: Number((frame.confidence || 0).toFixed(4)),
+      angles: frame.angles,
+      landmarks: serializeLandmarks(frame.landmarks, settings.landmarkSet)
+    }))
   };
 }
 
 function serializeSkeletonPairs(leftScan, rightScan, sync, settings = defaultMediaPipeSettings) {
   if (!leftScan?.frames?.length || !rightScan?.frames?.length) return [];
   const offset = sync?.ready ? sync.offsetSeconds : 0;
-  return leftScan.frames
-    .filter((frame) => frame.landmarks?.length)
+  const leftFrames = sampleEvenly(
+    leftScan.frames.filter((frame) => frame.landmarks?.length),
+    maxStoredSkeletonFrames
+  );
+  return leftFrames
     .map((leftFrame) => {
       const rightFrame = nearestFrame(rightScan.frames, leftFrame.time + offset);
       if (!rightFrame?.landmarks?.length) return null;
@@ -1744,6 +1805,13 @@ function serializeSkeletonPairs(leftScan, rightScan, sync, settings = defaultMed
       };
     })
     .filter(Boolean);
+}
+
+function sampleEvenly(items, maxItems) {
+  if (!Array.isArray(items) || items.length <= maxItems) return items || [];
+  if (maxItems <= 1) return items.slice(0, 1);
+  const lastIndex = items.length - 1;
+  return Array.from({ length: maxItems }, (_, index) => items[Math.round((index / (maxItems - 1)) * lastIndex)]);
 }
 
 function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave, onExport, onClear, canSave }) {
@@ -2197,15 +2265,23 @@ function App() {
   useEffect(() => () => cancelAnimationFrame(analysisRafRef.current), []);
 
   useEffect(() => {
-    localStorage.setItem(labHistoryKey, JSON.stringify(labHistory));
+    saveLabHistoryToStorage(labHistory);
   }, [labHistory]);
 
   useEffect(() => {
-    localStorage.setItem(mediaPipeSettingsKey, JSON.stringify(mediaPipeSettings));
+    try {
+      localStorage.setItem(mediaPipeSettingsKey, JSON.stringify(mediaPipeSettings));
+    } catch (err) {
+      console.warn("Не удалось сохранить настройки MediaPipe.", err);
+    }
   }, [mediaPipeSettings]);
 
   useEffect(() => {
-    localStorage.setItem(comparisonModelKey, comparisonModel);
+    try {
+      localStorage.setItem(comparisonModelKey, comparisonModel);
+    } catch (err) {
+      console.warn("Не удалось сохранить выбранную модель сравнения.", err);
+    }
   }, [comparisonModel]);
 
   const nextMediaPipeTimestamp = useCallback(() => {
@@ -2374,7 +2450,7 @@ function App() {
         durationCompared: result.durationCompared ?? null,
         worstMoment: result.worstMoment ?? null
       },
-      angleRows: result.rows,
+      angleRows: sampleEvenly(result.rows || [], maxStoredAngleRows),
       skeletons: {
         left: serializeScanSkeleton(leftScan, mediaPipeSettings),
         right: serializeScanSkeleton(rightScan, mediaPipeSettings),
@@ -2383,7 +2459,7 @@ function App() {
       suggestions: result.suggestions,
       verdict: result.verdict
     };
-    setLabHistory((items) => [nextItem, ...items]);
+    setLabHistory((items) => compactLabHistory([nextItem, ...items]));
   }
 
   function clearLabHistory() {
