@@ -1010,6 +1010,10 @@ function formatTime(seconds) {
   return `${minutes}:${rest}`;
 }
 
+function formatSeconds(seconds, digits = 1) {
+  return Number.isFinite(seconds) ? `${seconds.toFixed(digits)} сек` : "-";
+}
+
 function formatMetricValue(value, unit) {
   if (value === null || value === undefined || value === "-") return "-";
   if (unit === "") return value;
@@ -1980,7 +1984,7 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
       drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
       ctx.fillStyle = "#d8e8fa";
       ctx.font = "700 13px Inter, sans-serif";
-      ctx.fillText(`Эталон ${pair.leftTime.toFixed(1)}с / правое ${pair.rightTime.toFixed(1)}с`, 14, 24);
+      ctx.fillText(`Эталон ${formatSeconds(pair.leftTime)} / правое ${formatSeconds(pair.rightTime)}`, 14, 24);
     } else {
       ctx.fillStyle = "#d8e8fa";
       ctx.font = "700 15px Inter, sans-serif";
@@ -2039,8 +2043,8 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
         <span>
           Кадр {pairs.length ? currentIndex + 1 : 0}/{pairs.length}
         </span>
-        <span>Эталон: {pair ? `${pair.leftTime.toFixed(2)} сек` : "-"}</span>
-        <span>Правое: {pair ? `${pair.rightTime.toFixed(2)} сек` : "-"}</span>
+        <span>Эталон: {pair ? formatSeconds(pair.leftTime, 2) : "-"}</span>
+        <span>Правое: {pair ? formatSeconds(pair.rightTime, 2) : "-"}</span>
         <span>Схожесть кадра: {frameScore != null ? `${frameScore}%` : "-"}</span>
       </div>
       <p className="sync-note">
@@ -2567,8 +2571,8 @@ function App() {
             <p>{comparison.verdict}</p>
             {comparison.worstMoment && (
               <p className="worst-moment">
-                Самый слабый момент: эталон {comparison.worstMoment.leftTime.toFixed(1)} сек, правое видео{" "}
-                {comparison.worstMoment.rightTime.toFixed(1)} сек, схожесть {comparison.worstMoment.score}%.
+                Самый слабый момент: эталон {formatSeconds(comparison.worstMoment.leftTime)}, правое видео{" "}
+                {formatSeconds(comparison.worstMoment.rightTime)}, схожесть {comparison.worstMoment.score}%.
               </p>
             )}
           </div>

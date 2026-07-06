@@ -30,6 +30,14 @@ test("1000 ms late movement gets low timing score", () => {
   assert.ok(result.timingScore <= 25, `expected low timing score, got ${result.timingScore}`);
 });
 
+test("unmatched worst moment keeps missing right time explicit", () => {
+  const reference = makeSequence();
+  const user = makeSequence({ delayMs: 1000 });
+  const result = compareSkeletons_2026_07_06(reference, user, { syncWindowMs: 300 });
+  assert.equal(result.worstMoment.rightTime, null);
+  assert.equal(typeof result.worstMoment.leftTime, "number");
+});
+
 test("matching arms and wrong legs produce high arms score and low legs score", () => {
   const reference = makeSequence();
   const user = makeSequence({ wrongLegs: true });
