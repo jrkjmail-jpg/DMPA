@@ -118,7 +118,8 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
   const timingScore = average(frameResults.map((item) => item.timingScore));
   const baseFinalScore = clampScore(poseScore * 0.4 + boneDirectionScore * 0.25 + motionScore * 0.2 + timingScore * 0.15);
   const activityGate = activityGateFor(frameResults, activityScore);
-  const finalScore = clampScore(Math.min(baseFinalScore, activityGate.finalCap));
+  const motionRangeGate = motionRangeGateFor(frameResults);
+  const finalScore = clampScore(Math.min(baseFinalScore, activityGate.finalCap, motionRangeGate.finalCap));
   const bodyParts = bodyPartScores(frameResults);
   const worstFrame = frameResults.reduce((worst, item) => (item.frameScore < worst.frameScore ? item : worst), frameResults[0]);
   const weakPoints = weakPointsFor({
@@ -130,7 +131,8 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
     timingScore,
     bodyParts,
     missingJoints,
-    activityGate
+    activityGate,
+    motionRangeGate
   });
 
   return {
@@ -152,7 +154,8 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
       weakPoints,
       missingJoints: Array.from(missingJoints.entries()).map(([joint, count]) => ({ joint, frames: count })),
       confidence: confidenceFor(frameResults, missingJoints.size),
-      activity: activityGate
+      activity: activityGate,
+      motionRange: motionRangeGate
     },
     rows: rowsForResult({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, timingScore, bodyParts }),
     suggestions: weakPoints,
@@ -288,6 +291,8 @@ function comparePreparedFrames(referenceFrame, userFrame, options) {
     activityScore: activity.score,
     referenceActivity: activity.referenceActivity,
     userActivity: activity.userActivity,
+    referenceJoints: referenceFrame.normalized,
+    userJoints: userFrame.normalized,
     timingScore,
     timeOffsetMs,
     bodyParts: mergeBodyPartComponents([pose.parts, bone.parts, angles.parts, velocity.parts, activity.parts]),
@@ -307,6 +312,8 @@ function unmatchedFrameResult(referenceFrame, options) {
     activityScore: 0,
     referenceActivity: average(Object.values(referenceFrame.velocity || {}).map(length).filter(Number.isFinite)),
     userActivity: 0,
+    referenceJoints: referenceFrame.normalized,
+    userJoints: null,
     timingScore: 0,
     timeOffsetMs: options.syncWindowMs,
     bodyParts: { arms: 0, legs: 0, torso: 0, head: 0, rhythm: 0 },
@@ -447,6 +454,42 @@ function activityGateFor(frameResults, activityScore) {
   };
 }
 
+function motionRangeGateFor(frameResults) {
+  const referenceRange = sequenceMotionRange(frameResults, "referenceJoints");
+  const userRange = sequenceMotionRange(frameResults, "userJoints");
+  const rangeRatio = referenceRange > 0 ? userRange / referenceRange : 1;
+  const rangeScore = clampScore(Math.min(rangeRatio, referenceRange > 0 ? referenceRange / Math.max(userRange, 0.0001) : 1) * 100);
+  const referenceIsDynamic = referenceRange >= 0.12;
+  const userRangeTooSmall = userRange < referenceRange * 0.55;
+  const finalCap = referenceIsDynamic && userRangeTooSmall ? 22 + rangeScore * 0.45 : 100;
+  return {
+    referenceRange: Number(referenceRange.toFixed(4)),
+    userRange: Number(userRange.toFixed(4)),
+    rangeRatio: Number(rangeRatio.toFixed(3)),
+    staticRangeMismatch: referenceIsDynamic && userRangeTooSmall,
+    rangeScore,
+    finalCap: clampScore(finalCap)
+  };
+}
+
+function sequenceMotionRange(frameResults, key) {
+  const rangeJoints = ["leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftKnee", "rightKnee", "leftAnkle", "rightAnkle"];
+  const ranges = [];
+  for (const joint of rangeJoints) {
+    const points = frameResults.map((item) => item[key]?.[joint]).filter(Boolean);
+    if (points.length < 2) continue;
+    ranges.push(pointSpread(points));
+  }
+  return average(ranges);
+}
+
+function pointSpread(points) {
+  const xs = points.map((point) => point.x).filter(Number.isFinite);
+  const ys = points.map((point) => point.y).filter(Number.isFinite);
+  const zs = points.map((point) => point.z || 0).filter(Number.isFinite);
+  return Math.hypot(range(xs), range(ys), range(zs) * 0.5);
+}
+
 function aggregateActivityScore(frameResults) {
   const activeFrames = frameResults.filter((item) => item.referenceActivity >= 0.035);
   const source = activeFrames.length ? activeFrames : frameResults;
@@ -517,7 +560,7 @@ function rowsForResult(result) {
   ];
 }
 
-function weakPointsFor({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, timingScore, bodyParts, missingJoints, activityGate }) {
+function weakPointsFor({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, timingScore, bodyParts, missingJoints, activityGate, motionRangeGate }) {
   const weak = [];
   if (poseScore < 75) weak.push(`Относительная поза проседает до ${Math.round(poseScore)}%.`);
   if (boneDirectionScore < 75) weak.push(`Направления рук, ног или корпуса отличаются: ${Math.round(boneDirectionScore)}%.`);
@@ -525,6 +568,7 @@ function weakPointsFor({ poseScore, boneDirectionScore, angleScore, velocityScor
   if (velocityScore < 75) weak.push(`Движение идет с другой скоростью или в другом направлении: ${Math.round(velocityScore)}%.`);
   if (activityScore < 70) weak.push(`Энергия движения не совпадает: ${Math.round(activityScore)}%.`);
   if (activityGate?.staticMismatch) weak.push("Эталон активно движется, а правое видео почти статично, поэтому итоговая оценка ограничена.");
+  if (motionRangeGate?.staticRangeMismatch) weak.push("Амплитуда движения справа намного меньше эталона: похоже на стояние вместо танца.");
   if (timingScore < 75) weak.push(`Есть заметное раннее или позднее движение: ${Math.round(timingScore)}%.`);
   for (const [part, score] of Object.entries(bodyParts)) {
     if (score < 70) weak.push(`${bodyPartTitle(part)}: ${score}/100.`);
@@ -563,7 +607,8 @@ function emptyResult20260706(options, message) {
       weakPoints: [message],
       missingJoints: [],
       confidence: 0,
-      activity: { referenceActivity: 0, userActivity: 0, activityRatio: 0, staticMismatch: false, finalCap: 0 }
+      activity: { referenceActivity: 0, userActivity: 0, activityRatio: 0, staticMismatch: false, finalCap: 0 },
+      motionRange: { referenceRange: 0, userRange: 0, rangeRatio: 0, staticRangeMismatch: false, rangeScore: 0, finalCap: 0 }
     },
     rows: [],
     suggestions: [message],
@@ -679,6 +724,11 @@ function average(values) {
 function averageOrNull(values) {
   const clean = values.filter((value) => Number.isFinite(value));
   return clean.length ? average(clean) : null;
+}
+
+function range(values) {
+  const clean = values.filter((value) => Number.isFinite(value));
+  return clean.length ? Math.max(...clean) - Math.min(...clean) : 0;
 }
 
 function mapValues(object, mapper) {

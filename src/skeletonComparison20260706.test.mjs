@@ -54,6 +54,14 @@ test("dance against a standing person is not scored as highly similar", () => {
   assert.equal(result.diagnostics.activity.staticMismatch, true);
 });
 
+test("dance against a standing person with tracking jitter stays low", () => {
+  const reference = makeSequence();
+  const user = makeSequence({ freeze: true, jitter: 0.025 });
+  const result = compareSkeletons_2026_07_06(reference, user);
+  assert.ok(result.finalScore <= 55, `expected <= 55, got ${result.finalScore}`);
+  assert.equal(result.diagnostics.motionRange.staticRangeMismatch, true);
+});
+
 test("missing joint does not break calculation and appears in diagnostics", () => {
   const reference = makeSequence();
   const user = makeSequence();
@@ -75,7 +83,7 @@ test("worst moment keeps UI-compatible time fields", () => {
 function makeSequence(options = {}) {
   const frames = [0, 200, 400, 600, 800, 1000].map((timestamp) => ({
     timestamp: timestamp + (options.delayMs || 0),
-    joints: makePose(options.freeze ? 0 : timestamp / 1000, options)
+    joints: makePose(options.freeze ? 0 : timestamp / 1000, { ...options, timestamp })
   }));
   return { frames };
 }
@@ -125,7 +133,13 @@ function makePose(seconds, options = {}) {
   };
 
   function p(x, y) {
-    return { x: x * scale + offsetX, y: y * scale + offsetY, z: 0 };
+    const jitter = options.jitter || 0;
+    const seed = (options.timestamp || 0) / 200 + x * 7 + y * 11;
+    return {
+      x: x * scale + offsetX + Math.sin(seed) * jitter,
+      y: y * scale + offsetY + Math.cos(seed * 1.3) * jitter,
+      z: 0
+    };
   }
 }
 
