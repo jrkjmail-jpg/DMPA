@@ -45,6 +45,15 @@ test("different arm and leg lengths do not strongly reduce the score", () => {
   assert.ok(result.finalScore >= 84, `expected >= 84, got ${result.finalScore}`);
 });
 
+test("dance against a standing person is not scored as highly similar", () => {
+  const reference = makeSequence();
+  const user = makeSequence({ freeze: true });
+  const result = compareSkeletons_2026_07_06(reference, user);
+  assert.ok(result.finalScore <= 55, `expected <= 55, got ${result.finalScore}`);
+  assert.ok(result.activityScore <= 45, `expected low activity score, got ${result.activityScore}`);
+  assert.equal(result.diagnostics.activity.staticMismatch, true);
+});
+
 test("missing joint does not break calculation and appears in diagnostics", () => {
   const reference = makeSequence();
   const user = makeSequence();
@@ -66,7 +75,7 @@ test("worst moment keeps UI-compatible time fields", () => {
 function makeSequence(options = {}) {
   const frames = [0, 200, 400, 600, 800, 1000].map((timestamp) => ({
     timestamp: timestamp + (options.delayMs || 0),
-    joints: makePose(timestamp / 1000, options)
+    joints: makePose(options.freeze ? 0 : timestamp / 1000, options)
   }));
   return { frames };
 }

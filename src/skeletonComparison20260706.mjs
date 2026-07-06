@@ -111,11 +111,14 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
   const boneDirectionScore = average(frameResults.map((item) => item.boneDirectionScore));
   const angleScore = average(frameResults.map((item) => item.angleScore));
   const velocityScore = average(frameResults.map((item) => item.velocityScore));
+  const activityScore = aggregateActivityScore(frameResults);
   const motionScore = normalizedOptions.compareVelocity
-    ? angleScore * 0.625 + velocityScore * 0.375
+    ? angleScore * 0.45 + velocityScore * 0.3 + activityScore * 0.25
     : angleScore;
   const timingScore = average(frameResults.map((item) => item.timingScore));
-  const finalScore = clampScore(poseScore * 0.4 + boneDirectionScore * 0.25 + motionScore * 0.2 + timingScore * 0.15);
+  const baseFinalScore = clampScore(poseScore * 0.4 + boneDirectionScore * 0.25 + motionScore * 0.2 + timingScore * 0.15);
+  const activityGate = activityGateFor(frameResults, activityScore);
+  const finalScore = clampScore(Math.min(baseFinalScore, activityGate.finalCap));
   const bodyParts = bodyPartScores(frameResults);
   const worstFrame = frameResults.reduce((worst, item) => (item.frameScore < worst.frameScore ? item : worst), frameResults[0]);
   const weakPoints = weakPointsFor({
@@ -123,9 +126,11 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
     boneDirectionScore,
     angleScore,
     velocityScore,
+    activityScore,
     timingScore,
     bodyParts,
-    missingJoints
+    missingJoints,
+    activityGate
   });
 
   return {
@@ -139,15 +144,17 @@ export function compareSkeletons_2026_07_06(referenceSkeleton, userSkeleton, opt
     timingScore: clampScore(timingScore),
     angleScore: clampScore(angleScore),
     velocityScore: clampScore(velocityScore),
+    activityScore: clampScore(activityScore),
     bodyParts,
     diagnostics: {
       averageTimeOffsetMs: Math.round(average(frameResults.map((item) => Math.abs(item.timeOffsetMs)))),
       syncWindowMs: normalizedOptions.syncWindowMs,
       weakPoints,
       missingJoints: Array.from(missingJoints.entries()).map(([joint, count]) => ({ joint, frames: count })),
-      confidence: confidenceFor(frameResults, missingJoints.size)
+      confidence: confidenceFor(frameResults, missingJoints.size),
+      activity: activityGate
     },
-    rows: rowsForResult({ poseScore, boneDirectionScore, angleScore, velocityScore, timingScore, bodyParts }),
+    rows: rowsForResult({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, timingScore, bodyParts }),
     suggestions: weakPoints,
     framesCompared: frameResults.length,
     bestScore: clampScore(Math.max(...frameResults.map((item) => item.frameScore))),
@@ -265,9 +272,10 @@ function comparePreparedFrames(referenceFrame, userFrame, options) {
   const bone = options.compareBoneDirections ? compareBoneDirections(referenceFrame.boneDirections, userFrame.boneDirections) : perfectComponent();
   const angles = options.compareAngles ? compareAngles(referenceFrame.angles, userFrame.angles) : perfectComponent();
   const velocity = options.compareVelocity ? compareVelocity(referenceFrame.velocity, userFrame.velocity) : perfectComponent();
+  const activity = options.compareVelocity ? compareActivity(referenceFrame.velocity, userFrame.velocity) : perfectComponent();
   const timeOffsetMs = userFrame.timestampMs - referenceFrame.timestampMs;
   const timingScore = clampScore(100 - (Math.abs(timeOffsetMs) / options.syncWindowMs) * 100);
-  const frameScore = clampScore(pose.score * 0.35 + bone.score * 0.25 + angles.score * 0.25 + velocity.score * 0.15);
+  const frameScore = clampScore(pose.score * 0.3 + bone.score * 0.22 + angles.score * 0.22 + velocity.score * 0.14 + activity.score * 0.12);
 
   return {
     frameScore,
@@ -277,10 +285,13 @@ function comparePreparedFrames(referenceFrame, userFrame, options) {
     boneDirectionScore: bone.score,
     angleScore: angles.score,
     velocityScore: velocity.score,
+    activityScore: activity.score,
+    referenceActivity: activity.referenceActivity,
+    userActivity: activity.userActivity,
     timingScore,
     timeOffsetMs,
-    bodyParts: mergeBodyPartComponents([pose.parts, bone.parts, angles.parts, velocity.parts]),
-    missingJoints: [...pose.missingJoints, ...bone.missingJoints, ...angles.missingJoints, ...velocity.missingJoints]
+    bodyParts: mergeBodyPartComponents([pose.parts, bone.parts, angles.parts, velocity.parts, activity.parts]),
+    missingJoints: [...pose.missingJoints, ...bone.missingJoints, ...angles.missingJoints, ...velocity.missingJoints, ...activity.missingJoints]
   };
 }
 
@@ -293,6 +304,9 @@ function unmatchedFrameResult(referenceFrame, options) {
     boneDirectionScore: 0,
     angleScore: 0,
     velocityScore: 0,
+    activityScore: 0,
+    referenceActivity: average(Object.values(referenceFrame.velocity || {}).map(length).filter(Number.isFinite)),
+    userActivity: 0,
     timingScore: 0,
     timeOffsetMs: options.syncWindowMs,
     bodyParts: { arms: 0, legs: 0, torso: 0, head: 0, rhythm: 0 },
@@ -384,6 +398,61 @@ function compareVelocity(left, right) {
   return componentFromParts(parts, missingJoints);
 }
 
+function compareActivity(left, right) {
+  const parts = {};
+  const missingJoints = [];
+  for (const [part, partJoints] of Object.entries(bodyPartJoints)) {
+    const scores = [];
+    for (const joint of partJoints) {
+      const a = left[joint];
+      const b = right[joint];
+      if (!a || !b) {
+        missingJoints.push(`activity-${joint}`);
+        continue;
+      }
+      scores.push(activityRatioScore(length(a), length(b)));
+    }
+    parts[part] = averageOrNull(scores);
+  }
+  const referenceActivity = average(Object.values(left || {}).map(length).filter(Number.isFinite));
+  const userActivity = average(Object.values(right || {}).map(length).filter(Number.isFinite));
+  const component = componentFromParts(parts, missingJoints);
+  return {
+    ...component,
+    score: average([parts.arms, parts.legs].filter(Number.isFinite)),
+    referenceActivity,
+    userActivity
+  };
+}
+
+function activityRatioScore(referenceActivity, userActivity) {
+  if (referenceActivity < 0.015 && userActivity < 0.015) return 100;
+  const strongest = Math.max(referenceActivity, userActivity, 0.0001);
+  const weakest = Math.min(referenceActivity, userActivity);
+  return clampScore((weakest / strongest) * 100);
+}
+
+function activityGateFor(frameResults, activityScore) {
+  const referenceActivity = average(frameResults.map((item) => item.referenceActivity).filter(Number.isFinite));
+  const userActivity = average(frameResults.map((item) => item.userActivity).filter(Number.isFinite));
+  const referenceIsDancing = referenceActivity >= 0.035;
+  const userIsAlmostStatic = userActivity < referenceActivity * 0.45;
+  const finalCap = referenceIsDancing && userIsAlmostStatic ? 28 + clampScore(activityScore) * 0.35 : 100;
+  return {
+    referenceActivity: Number(referenceActivity.toFixed(4)),
+    userActivity: Number(userActivity.toFixed(4)),
+    activityRatio: Number((referenceActivity > 0 ? userActivity / referenceActivity : 1).toFixed(3)),
+    staticMismatch: referenceIsDancing && userIsAlmostStatic,
+    finalCap: clampScore(finalCap)
+  };
+}
+
+function aggregateActivityScore(frameResults) {
+  const activeFrames = frameResults.filter((item) => item.referenceActivity >= 0.035);
+  const source = activeFrames.length ? activeFrames : frameResults;
+  return average(source.map((item) => item.activityScore));
+}
+
 function componentFromParts(parts, missingJoints) {
   const values = Object.values(parts).filter(Number.isFinite);
   return {
@@ -434,6 +503,7 @@ function rowsForResult(result) {
     },
     { id: "2026-angles", title: "06.07.2026: углы суставов", leftValue: result.angleScore, rightValue: 100, diff: 100 - result.angleScore, unit: "%", score: result.angleScore },
     { id: "2026-motion", title: "06.07.2026: скорость движения", leftValue: result.velocityScore, rightValue: 100, diff: 100 - result.velocityScore, unit: "%", score: result.velocityScore },
+    { id: "2026-activity", title: "06.07.2026: энергия движения", leftValue: result.activityScore, rightValue: 100, diff: 100 - result.activityScore, unit: "%", score: result.activityScore },
     { id: "2026-rhythm", title: "06.07.2026: ритм и синхронность", leftValue: result.timingScore, rightValue: 100, diff: 100 - result.timingScore, unit: "%", score: result.timingScore },
     ...Object.entries(result.bodyParts).map(([part, score]) => ({
       id: `2026-part-${part}`,
@@ -447,12 +517,14 @@ function rowsForResult(result) {
   ];
 }
 
-function weakPointsFor({ poseScore, boneDirectionScore, angleScore, velocityScore, timingScore, bodyParts, missingJoints }) {
+function weakPointsFor({ poseScore, boneDirectionScore, angleScore, velocityScore, activityScore, timingScore, bodyParts, missingJoints, activityGate }) {
   const weak = [];
   if (poseScore < 75) weak.push(`Относительная поза проседает до ${Math.round(poseScore)}%.`);
   if (boneDirectionScore < 75) weak.push(`Направления рук, ног или корпуса отличаются: ${Math.round(boneDirectionScore)}%.`);
   if (angleScore < 75) weak.push(`Углы суставов отличаются: ${Math.round(angleScore)}%.`);
   if (velocityScore < 75) weak.push(`Движение идет с другой скоростью или в другом направлении: ${Math.round(velocityScore)}%.`);
+  if (activityScore < 70) weak.push(`Энергия движения не совпадает: ${Math.round(activityScore)}%.`);
+  if (activityGate?.staticMismatch) weak.push("Эталон активно движется, а правое видео почти статично, поэтому итоговая оценка ограничена.");
   if (timingScore < 75) weak.push(`Есть заметное раннее или позднее движение: ${Math.round(timingScore)}%.`);
   for (const [part, score] of Object.entries(bodyParts)) {
     if (score < 70) weak.push(`${bodyPartTitle(part)}: ${score}/100.`);
@@ -483,8 +555,16 @@ function emptyResult20260706(options, message) {
     boneDirectionScore: 0,
     motionScore: 0,
     timingScore: 0,
+    activityScore: 0,
     bodyParts: { arms: 0, legs: 0, torso: 0, head: 0, rhythm: 0 },
-    diagnostics: { averageTimeOffsetMs: 0, syncWindowMs: options.syncWindowMs, weakPoints: [message], missingJoints: [], confidence: 0 },
+    diagnostics: {
+      averageTimeOffsetMs: 0,
+      syncWindowMs: options.syncWindowMs,
+      weakPoints: [message],
+      missingJoints: [],
+      confidence: 0,
+      activity: { referenceActivity: 0, userActivity: 0, activityRatio: 0, staticMismatch: false, finalCap: 0 }
+    },
     rows: [],
     suggestions: [message],
     framesCompared: 0,
