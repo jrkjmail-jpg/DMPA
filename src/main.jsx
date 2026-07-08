@@ -2757,17 +2757,15 @@ function App() {
 
           <div className="angle-table">
             <div className="table-head">
-              <span>Сегмент</span>
-              <span>Эталон</span>
-              <span>Правое</span>
-              <span>Разница</span>
+              <span>Метрика</span>
+              <span>Отклонение правого от эталона</span>
             </div>
             {(comparison.rows.length ? comparison.rows : activeSpecs).map((row) => (
               <div className="table-row" key={row.id}>
                 <span>{row.title}</span>
-                <span>{formatMetricValue(row.leftValue, row.unit)}</span>
-                <span>{formatMetricValue(row.rightValue, row.unit)}</span>
-                <span className={row.diff > 18 ? "bad" : row.diff > 9 ? "warn" : "good"}>{formatMetricValue(row.diff, row.unit)}</span>
+                <span className={row.diff > 18 ? "bad" : row.diff > 9 ? "warn" : "good"}>
+                  {formatMetricValue(row.diff, row.unit)}
+                </span>
               </div>
             ))}
           </div>
