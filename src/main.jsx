@@ -69,8 +69,18 @@ const comparisonModels = {
     shortTitle: "4. 06.07.2026",
     description:
       "Сравнение скелетов с нормализацией комплекции и мягкой синхронизацией под музыку."
+  },
+  "all-auto": {
+    id: "all-auto",
+    name: "Все модели + автосканирование",
+    title: "Все модели + автосканирование",
+    shortTitle: "5. Все модели",
+    description:
+      "Лабораторный режим: одной кнопкой сканирует оба видео, затем прогоняет все доступные модели и сохраняет результаты в историю."
   }
 };
+
+const runnableComparisonModelIds = Object.keys(comparisonModels).filter((id) => id !== "all-auto");
 
 const comparisonModelKey = "dmpa.comparison.model.v1";
 const maxScanFrames = 3600;
@@ -1126,6 +1136,7 @@ const VideoPane = forwardRef(function VideoPane(
 
   useImperativeHandle(ref, () => ({
     video: videoRef.current,
+    scanSkeleton,
     async playAt(time, withSound = false) {
       const video = videoRef.current;
       if (!video) return false;
@@ -1329,10 +1340,12 @@ const VideoPane = forwardRef(function VideoPane(
         mediaPipeSettings
       );
       onScanComplete(result);
+      return result;
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setError(`Не получилось отсканировать скелет: ${detail}`);
       console.error(err);
+      throw err;
     } finally {
       isScanningRef.current = false;
       setIsScanning(false);
@@ -2412,11 +2425,86 @@ function App() {
     analysisRafRef.current = requestAnimationFrame(tick);
   }
 
-  function saveLabExample(resultOverride = null, syncOverride = sync, saveMode = "manual") {
+  async function runAllModelsAuto() {
+    if (runState.status === "running") return;
+    cancelAnimationFrame(analysisRafRef.current);
+    setRunState({
+      status: "running",
+      progress: 3,
+      result: null,
+      message: "Автолаборатория: сканирую левое эталонное видео."
+    });
+
+    try {
+      const freshLeftScan = leftScan?.frames?.length ? leftScan : await leftVideoRef.current?.scanSkeleton();
+      if (!freshLeftScan?.frames?.length) throw new Error("Не удалось получить скан левого видео.");
+      setLeftScan(freshLeftScan);
+      setRunState((previous) => ({
+        ...previous,
+        progress: 35,
+        message: "Автолаборатория: левый скелет готов, сканирую правое видео."
+      }));
+
+      const freshRightScan = rightScan?.frames?.length ? rightScan : await rightVideoRef.current?.scanSkeleton();
+      if (!freshRightScan?.frames?.length) throw new Error("Не удалось получить скан правого видео.");
+      setRightScan(freshRightScan);
+
+      let activeSync = sync;
+      if (leftAudio && rightAudio) {
+        activeSync = estimateAudioSync(leftAudio, rightAudio);
+        setSync(activeSync);
+        setAudioStatus(activeSync.ready ? "Автолаборатория рассчитала синхронизацию по аудио." : activeSync.message);
+      }
+
+      setRunState((previous) => ({
+        ...previous,
+        progress: 72,
+        message: "Автолаборатория: прогоняю все модели сравнения."
+      }));
+
+      const results = runnableComparisonModelIds.map((modelId) => ({
+        modelId,
+        result: compareByModel(modelId, freshLeftScan, freshRightScan, activeSync, mediaPipeSettings.regions, leftAudio)
+      }));
+
+      for (const { modelId, result } of results) {
+        saveLabExample(result, activeSync, "auto", modelId, freshLeftScan, freshRightScan);
+      }
+
+      const primary = results.find((item) => item.modelId === "2026-07-06")?.result || results[0]?.result || null;
+      setRunState({
+        status: "done",
+        progress: 100,
+        result: primary,
+        message: `Автолаборатория завершена: ${results.length} моделей рассчитаны и сохранены в историю.`
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setRunState({
+        status: "error",
+        progress: 0,
+        result: null,
+        message: `Автолаборатория остановилась: ${detail}`
+      });
+      console.error(err);
+    }
+  }
+
+  function saveLabExample(
+    resultOverride = null,
+    syncOverride = sync,
+    saveMode = "manual",
+    modelOverride = comparisonModel,
+    leftScanOverride = leftScan,
+    rightScanOverride = rightScan
+  ) {
     const result = resultOverride || runState.result;
     if (!result?.ready) return;
-    const leftVideoProfile = fileProfile(leftFile, leftScan, leftAudio);
-    const rightVideoProfile = fileProfile(rightFile, rightScan, rightAudio);
+    const savedModel = modelOverride === "all-auto" ? "angles" : modelOverride;
+    const activeLeftScan = leftScanOverride || leftScan;
+    const activeRightScan = rightScanOverride || rightScan;
+    const leftVideoProfile = fileProfile(leftFile, activeLeftScan, leftAudio);
+    const rightVideoProfile = fileProfile(rightFile, activeRightScan, rightAudio);
     const nextItem = {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
@@ -2430,8 +2518,8 @@ function App() {
         right: rightVideoProfile,
         sameFileCandidate: sameFileCandidate(leftVideoProfile, rightVideoProfile)
       },
-      comparisonModel,
-      comparisonModelDetails: comparisonModels[comparisonModel],
+      comparisonModel: savedModel,
+      comparisonModelDetails: comparisonModels[savedModel],
       mediaPipeSettings: {
         ...mediaPipeSettings,
         activeAngles: activeSpecs.map((spec) => ({
@@ -2452,9 +2540,9 @@ function App() {
       },
       angleRows: sampleEvenly(result.rows || [], maxStoredAngleRows),
       skeletons: {
-        left: serializeScanSkeleton(leftScan, mediaPipeSettings),
-        right: serializeScanSkeleton(rightScan, mediaPipeSettings),
-        synchronizedPairs: serializeSkeletonPairs(leftScan, rightScan, syncOverride, mediaPipeSettings)
+        left: serializeScanSkeleton(activeLeftScan, mediaPipeSettings),
+        right: serializeScanSkeleton(activeRightScan, mediaPipeSettings),
+        synchronizedPairs: serializeSkeletonPairs(activeLeftScan, activeRightScan, syncOverride, mediaPipeSettings)
       },
       suggestions: result.suggestions,
       verdict: result.verdict
@@ -2576,14 +2664,21 @@ function App() {
           <Waves size={18} />
           Синхронизировать по аудио
         </button>
-        <button
-          type="button"
-          onClick={() => playSynchronizedAnalysis()}
-          disabled={!leftScan?.frames?.length || !rightScan?.frames?.length || runState.status === "running"}
-        >
-          <Play size={18} />
-          {runState.status === "running" ? `Анализ ${runState.progress}%` : "Повторить анализ всего видео"}
-        </button>
+        {comparisonModel === "all-auto" ? (
+          <button type="button" onClick={runAllModelsAuto} disabled={!scanLandmarker || runState.status === "running"}>
+            <Play size={18} />
+            {runState.status === "running" ? `Автолаборатория ${runState.progress}%` : "Начать"}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => playSynchronizedAnalysis()}
+            disabled={!leftScan?.frames?.length || !rightScan?.frames?.length || runState.status === "running"}
+          >
+            <Play size={18} />
+            {runState.status === "running" ? `Анализ ${runState.progress}%` : "Повторить анализ всего видео"}
+          </button>
+        )}
         <span>{audioStatus || "Аудио используется для выравнивания одинаковых музыкальных фрагментов."}</span>
       </div>
 
@@ -2593,12 +2688,19 @@ function App() {
             {runState.status === "done"
               ? "Итоговый прогон завершен"
               : runState.status === "running"
-                ? "Идет синхронное воспроизведение"
+                ? comparisonModel === "all-auto"
+                  ? "Идет автолаборатория"
+                  : "Идет синхронное воспроизведение"
                 : runState.status === "ready"
                   ? "Готово к полному прогону"
                   : "Полный прогон еще не запускался"}
           </strong>
-          <span>{runState.message || "После синхронизации запустите видео один раз, чтобы получить статистику всего танца."}</span>
+          <span>
+            {runState.message ||
+              (comparisonModel === "all-auto"
+                ? "Загрузите оба видео и нажмите «Начать»: приложение само отсканирует скелеты и сохранит результаты всех моделей."
+                : "После синхронизации запустите видео один раз, чтобы получить статистику всего танца.")}
+          </span>
         </div>
         <div className="run-progress" aria-label="Прогресс анализа">
           <i style={{ width: `${runState.progress}%` }} />
