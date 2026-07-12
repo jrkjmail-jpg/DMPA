@@ -239,6 +239,40 @@ function projectLandmarksToCanvas(landmarks, rect, canvasWidth, canvasHeight) {
   }));
 }
 
+function nearestScanFrame(frames = [], time = 0) {
+  if (!frames.length) return null;
+  let low = 0;
+  let high = frames.length - 1;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if ((frames[mid]?.time || 0) < time) low = mid + 1;
+    else high = mid;
+  }
+  const next = frames[low];
+  const previous = frames[Math.max(0, low - 1)];
+  if (!previous) return next;
+  if (!next) return previous;
+  return Math.abs((previous.time || 0) - time) <= Math.abs((next.time || 0) - time) ? previous : next;
+}
+
+function drawVideoSkeleton(ctx, landmarks, canvas, video, side) {
+  if (!landmarks?.length || !canvas?.width || !canvas?.height || !video?.videoWidth || !video?.videoHeight) return;
+  const rect = containRect(canvas.width, canvas.height, video.videoWidth, video.videoHeight);
+  const projectedLandmarks = projectLandmarksToCanvas(landmarks, rect, canvas.width, canvas.height);
+  const visualScale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const color = side === "left" ? "#28d7a4" : "#55a4ff";
+  const drawingUtils = new DrawingUtils(ctx);
+  drawingUtils.drawConnectors(projectedLandmarks, PoseLandmarker.POSE_CONNECTIONS, {
+    color,
+    lineWidth: Math.max(1.5, 4 * visualScale)
+  });
+  drawingUtils.drawLandmarks(projectedLandmarks, {
+    color,
+    fillColor: color,
+    radius: Math.max(1.2, 2.4 * visualScale)
+  });
+}
+
 function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regions) {
   if (!left?.landmarks?.length || !right?.landmarks?.length) {
     return {
@@ -1239,18 +1273,11 @@ const VideoPane = forwardRef(function VideoPane(
   const analyzeFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (liveDetectionPaused) {
-      const ctx = canvas?.getContext("2d");
-      if (ctx && canvas.width && canvas.height) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      lastVideoTimeRef.current = -1;
-      rafRef.current = requestAnimationFrame(analyzeFrame);
-      return;
-    }
     if (isScanningRef.current) {
       rafRef.current = requestAnimationFrame(analyzeFrame);
       return;
     }
-    if (!video || !canvas || !landmarker || video.readyState < 2) {
+    if (!video || !canvas || video.readyState < 2) {
       rafRef.current = requestAnimationFrame(analyzeFrame);
       return;
     }
@@ -1268,8 +1295,6 @@ const VideoPane = forwardRef(function VideoPane(
     }
 
     if (lastVideoTimeRef.current !== video.currentTime) {
-      const result = landmarker.detectForVideo(video, nextTimestamp());
-      const landmarks = result.landmarks?.[0] || [];
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const isInsideAnalysisRange =
@@ -1277,33 +1302,46 @@ const VideoPane = forwardRef(function VideoPane(
         !analysisRange ||
         (video.currentTime >= analysisRange.start && video.currentTime <= analysisRange.end);
 
-      if (landmarks.length && isInsideAnalysisRange) {
-        const rect = containRect(canvas.width, canvas.height, video.videoWidth, video.videoHeight);
-        const projectedLandmarks = projectLandmarksToCanvas(landmarks, rect, canvas.width, canvas.height);
-        const visualScale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
-        const drawingUtils = new DrawingUtils(ctx);
-        drawingUtils.drawConnectors(projectedLandmarks, PoseLandmarker.POSE_CONNECTIONS, {
-          color: side === "left" ? "#28d7a4" : "#55a4ff",
-          lineWidth: Math.max(1.5, 4 * visualScale)
+      if (scan?.frames?.length) {
+        const isInsideScanRange =
+          !scan.range || (video.currentTime >= scan.range.start && video.currentTime <= scan.range.end);
+        const savedFrame = isInsideScanRange ? nearestScanFrame(scan.frames, video.currentTime) : null;
+        if (savedFrame?.landmarks?.length) drawVideoSkeleton(ctx, savedFrame.landmarks, canvas, video, side);
+        onPose({
+          landmarks: savedFrame?.landmarks || [],
+          angles: savedFrame?.angles || {},
+          timestamp: video.currentTime,
+          confidence: savedFrame?.confidence || 0,
+          source: "scan"
         });
-        drawingUtils.drawLandmarks(projectedLandmarks, {
-          color: side === "left" ? "#28d7a4" : "#55a4ff",
-          fillColor: side === "left" ? "#28d7a4" : "#55a4ff",
-          radius: Math.max(1.2, 2.4 * visualScale)
-        });
+        lastVideoTimeRef.current = video.currentTime;
+        rafRef.current = requestAnimationFrame(analyzeFrame);
+        return;
       }
+
+      if (liveDetectionPaused || !landmarker) {
+        onPose({ landmarks: [], angles: {}, timestamp: video.currentTime, confidence: 0, source: "paused" });
+        lastVideoTimeRef.current = video.currentTime;
+        rafRef.current = requestAnimationFrame(analyzeFrame);
+        return;
+      }
+
+      const result = landmarker.detectForVideo(video, nextTimestamp());
+      const landmarks = result.landmarks?.[0] || [];
+      if (landmarks.length && isInsideAnalysisRange) drawVideoSkeleton(ctx, landmarks, canvas, video, side);
 
       onPose({
         landmarks: isInsideAnalysisRange ? landmarks : [],
         angles: isInsideAnalysisRange ? poseAngles(landmarks, specs) : {},
         timestamp: video.currentTime,
-        confidence: landmarks.length && isInsideAnalysisRange ? averageVisibility(landmarks) : 0
+        confidence: landmarks.length && isInsideAnalysisRange ? averageVisibility(landmarks) : 0,
+        source: "live"
       });
       lastVideoTimeRef.current = video.currentTime;
     }
 
     rafRef.current = requestAnimationFrame(analyzeFrame);
-  }, [analysisRange, landmarker, liveDetectionPaused, onPose, showAnalysisRange, side, specs]);
+  }, [analysisRange, landmarker, liveDetectionPaused, nextTimestamp, onPose, scan, showAnalysisRange, side, specs]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(analyzeFrame);
