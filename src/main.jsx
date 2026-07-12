@@ -3216,6 +3216,9 @@ function App() {
             <MetricCard label="Лучший момент" value={comparison.bestScore != null ? `${comparison.bestScore}%` : "-"} />
             <MetricCard label="Худший момент" value={comparison.worstScore != null ? `${comparison.worstScore}%` : "-"} />
             <MetricCard label="Длительность анализа" value={comparison.durationCompared ? `${comparison.durationCompared} сек` : "-"} />
+            {comparison.diagnostics?.trackingOutliersSkipped > 0 && (
+              <MetricCard label="Плохих кадров пропущено" value={comparison.diagnostics.trackingOutliersSkipped} />
+            )}
             {comparison.bodyParts && (
               <>
                 <MetricCard label="Руки" value={`${comparison.bodyParts.arms ?? 0}%`} />

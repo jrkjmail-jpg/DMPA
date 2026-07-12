@@ -18,6 +18,14 @@ test("torso width mismatch is locked to reference before scoring limbs", () => {
   assert.ok(result.finalScore >= 78, `expected final score >= 78, got ${result.finalScore}`);
 });
 
+test("brief MediaPipe tracking explosion is skipped instead of penalizing the dance", () => {
+  const reference = makeDanceSequence();
+  const user = corruptFrame(makeDanceSequence(), 18);
+  const result = compareSkeletons_2026_07_12(reference, user);
+  assert.ok(result.finalScore >= 92, `expected final score >= 92, got ${result.finalScore}`);
+  assert.ok(result.diagnostics.userOutliersSkipped >= 1, `expected skipped user outlier, got ${result.diagnostics.userOutliersSkipped}`);
+});
+
 test("identical choreography scores near 100", () => {
   const reference = makeDanceSequence();
   const result = compareSkeletons_2026_07_12(reference, reference);
@@ -61,6 +69,28 @@ function widenTorso(sequence, factor) {
         return { ...point, x: centerX + (point.x - centerX) * factor };
       });
       return { ...frame, landmarks };
+    })
+  };
+}
+
+function corruptFrame(sequence, frameIndex) {
+  return {
+    frames: sequence.frames.map((frame, index) => {
+      if (index !== frameIndex) return frame;
+      return {
+        ...frame,
+        confidence: 0.12,
+        landmarks: frame.landmarks.map((point, pointIndex) =>
+          point
+            ? {
+                ...point,
+                x: point.x + (pointIndex % 2 ? 8 : -7),
+                y: point.y + (pointIndex % 3 ? -6 : 9),
+                visibility: 0.05
+              }
+            : point
+        )
+      };
     })
   };
 }

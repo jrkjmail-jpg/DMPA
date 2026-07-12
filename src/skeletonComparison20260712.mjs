@@ -41,8 +41,10 @@ const angleSpecs = [
 
 export function compareSkeletons_2026_07_12(referenceSkeleton, userSkeleton, options = {}) {
   const maxFrames = Math.max(40, Math.min(260, options.maxFrames || 180));
-  const referenceFrames = prepareSequence(referenceSkeleton, maxFrames);
-  const userFrames = prepareSequence(userSkeleton, maxFrames);
+  const referencePrepared = prepareSequence(referenceSkeleton, maxFrames);
+  const userPrepared = prepareSequence(userSkeleton, maxFrames);
+  const referenceFrames = referencePrepared.frames;
+  const userFrames = userPrepared.frames;
 
   if (referenceFrames.length < 2 || userFrames.length < 2) {
     return emptyResult("Недостаточно кадров для эластичного сравнения.");
@@ -74,6 +76,9 @@ export function compareSkeletons_2026_07_12(referenceSkeleton, userSkeleton, opt
     diagnostics: {
       averageTimeOffsetMs: Math.round(average(alignment.path.map(([i, j]) => Math.abs(referenceFrames[i].timestampMs - userFrames[j].timestampMs)))),
       elasticPathLength: alignment.path.length,
+      trackingOutliersSkipped: referencePrepared.skippedFrames + userPrepared.skippedFrames,
+      referenceOutliersSkipped: referencePrepared.skippedFrames,
+      userOutliersSkipped: userPrepared.skippedFrames,
       weakPoints,
       missingJoints: [],
       confidence: confidenceFor(referenceFrames, userFrames)
@@ -97,9 +102,16 @@ function prepareSequence(input, maxFrames) {
       landmarks: landmarkMap(frame.joints || frame.landmarks || frame.points || frame),
       confidence: Number(frame.confidence || 0)
     }))
-    .filter((frame) => frame.landmarks);
-  const scale = stableScale(mapped);
-  return sampleEvenly(mapped, maxFrames).map((frame) => {
+    .filter((frame) => frame.landmarks)
+    .map((frame) => ({
+      ...frame,
+      bodyScale: bodyScale(frame.landmarks),
+      spread: skeletonSpread(frame.landmarks),
+      visibility: landmarkVisibility(frame.landmarks)
+    }));
+  const filtered = filterTrackingOutliers(mapped);
+  const scale = stableScale(filtered.frames);
+  const preparedFrames = sampleEvenly(filtered.frames, maxFrames).map((frame) => {
     const normalized = normalizeFrame(frame.landmarks, scale);
     return {
       ...frame,
@@ -108,6 +120,10 @@ function prepareSequence(input, maxFrames) {
       bones: bonesFor(normalized)
     };
   });
+  return {
+    frames: preparedFrames,
+    skippedFrames: filtered.skippedFrames
+  };
 }
 
 function normalizeInput(input) {
@@ -168,6 +184,54 @@ function bodyScale(points) {
   const thigh = average([distance(points.leftHip, points.leftKnee), distance(points.rightHip, points.rightKnee)]);
   const shin = average([distance(points.leftKnee, points.leftAnkle), distance(points.rightKnee, points.rightAnkle)]);
   return Math.max(0.0001, torso + thigh + shin || 1);
+}
+
+function filterTrackingOutliers(frames) {
+  if (frames.length < 6) return { frames, skippedFrames: 0 };
+  const medianScale = median(frames.map((frame) => frame.bodyScale).filter((value) => value > 0));
+  const medianSpread = median(frames.map((frame) => frame.spread).filter((value) => value > 0));
+  const medianStep = median(
+    frames
+      .slice(1)
+      .map((frame, index) => normalizedFrameJump(frames[index].landmarks, frame.landmarks, medianScale))
+      .filter(Number.isFinite)
+  );
+  const kept = frames.filter((frame, index) => {
+    const scaleRatio = frame.bodyScale / Math.max(medianScale, 0.000001);
+    const spreadRatio = frame.spread / Math.max(medianSpread, 0.000001);
+    const previousJump = index > 0 ? normalizedFrameJump(frames[index - 1].landmarks, frame.landmarks, medianScale) : 0;
+    const nextJump = index < frames.length - 1 ? normalizedFrameJump(frame.landmarks, frames[index + 1].landmarks, medianScale) : 0;
+    const jumpLimit = Math.max(1.1, medianStep * 5.5);
+    const isolatedJump = previousJump > jumpLimit && nextJump > jumpLimit;
+    return (
+      frame.visibility >= 0.28 &&
+      scaleRatio >= 0.42 &&
+      scaleRatio <= 2.35 &&
+      spreadRatio >= 0.35 &&
+      spreadRatio <= 2.75 &&
+      !isolatedJump
+    );
+  });
+  if (kept.length < Math.max(4, frames.length * 0.35)) return { frames, skippedFrames: 0 };
+  return { frames: kept, skippedFrames: frames.length - kept.length };
+}
+
+function skeletonSpread(points) {
+  const selected = compareJoints.map((joint) => points[joint]).filter(Boolean);
+  if (!selected.length) return 0;
+  return Math.hypot(range(selected.map((point) => point.x)), range(selected.map((point) => point.y)), range(selected.map((point) => point.z || 0)) * 0.5);
+}
+
+function landmarkVisibility(points) {
+  const values = compareJoints.map((joint) => points[joint]?.visibility).filter(Number.isFinite);
+  return values.length ? average(values) : 1;
+}
+
+function normalizedFrameJump(previous, current, scale) {
+  const jumps = compareJoints
+    .map((joint) => distance(previous[joint], current[joint]) / Math.max(scale, 0.000001))
+    .filter(Number.isFinite);
+  return jumps.length ? average(jumps) : 0;
 }
 
 function fitTorsoToReference(referencePoints, userPoints) {
@@ -539,6 +603,11 @@ function range(values) {
 function average(values) {
   const clean = values.filter((value) => Number.isFinite(value));
   return clean.length ? clean.reduce((sum, value) => sum + value, 0) / clean.length : 0;
+}
+
+function median(values) {
+  const clean = values.filter(Number.isFinite).sort((a, b) => a - b);
+  return clean.length ? clean[Math.floor(clean.length / 2)] : 0;
 }
 
 function averagePoint(points) {
