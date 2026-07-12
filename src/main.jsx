@@ -344,21 +344,14 @@ function compareScans(leftScan, rightScan, sync, regions = defaultMediaPipeSetti
   if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null, regions);
 
   const offset = sync?.ready ? sync.offsetSeconds : 0;
-  const usableFrames = leftScan.frames
-    .filter((frame) => frame.landmarks?.length)
-    .map((leftFrame) => {
-      const rightFrame = nearestFrame(rightScan.frames, leftFrame.time + offset);
-      if (!rightFrame?.landmarks?.length) return null;
-      return {
-        leftTime: leftFrame.time,
-        rightTime: rightFrame.time,
-        comparison: comparePoseFrames(leftFrame, rightFrame, regions, {
-          leftAspect: leftScan?.video?.aspect,
-          rightAspect: rightScan?.video?.aspect
-        })
-      };
+  const anglePairs = synchronizedAngleFramePairs(leftScan, rightScan, offset);
+  const usableFrames = anglePairs.pairs.map((pair) => ({
+    ...pair,
+    comparison: comparePoseFrames(pair.leftFrame, pair.rightFrame, regions, {
+      leftAspect: leftScan?.video?.aspect,
+      rightAspect: rightScan?.video?.aspect
     })
-    .filter(Boolean);
+  }));
 
   if (!usableFrames.length) return comparePoseFrames(null, null, regions);
 
@@ -406,6 +399,11 @@ function compareScans(leftScan, rightScan, sync, regions = defaultMediaPipeSetti
     rows,
     suggestions,
     framesCompared: usableFrames.length,
+    diagnostics: {
+      trackingOutliersSkipped: anglePairs.skipped,
+      referenceOutliersSkipped: anglePairs.leftSkipped,
+      userOutliersSkipped: anglePairs.rightSkipped
+    },
     bestScore: Math.round(bestScore),
     worstScore: Math.round(worstScore),
     durationCompared: Number((usableFrames.at(-1).leftTime - usableFrames[0].leftTime).toFixed(1)),
@@ -730,6 +728,117 @@ function fitNormalizedSkeletonToReference(referenceLandmarks, userLandmarks) {
     if (referenceLandmarks?.[id] && fitted?.[id]) fitted[id] = { ...fitted[id], ...referenceLandmarks[id] };
   }
   return fitted;
+}
+
+function filterAngleScanFrames(scan) {
+  const sourceFrames = scan?.frames?.filter((frame) => frame.landmarks?.length) || [];
+  if (sourceFrames.length < 6) return { frames: sourceFrames, skipped: 0 };
+  const aspect = scan?.video?.aspect || 1;
+  const measured = sourceFrames
+    .map((frame) => {
+      const normalized = normalizeSkeleton(frame.landmarks, aspect);
+      return normalized?.length
+        ? {
+            frame,
+            normalized,
+            spread: normalizedSkeletonSpread(normalized),
+            maxBone: maxSkeletonBoneLength(normalized),
+            visibility: averageNumbers(coreLandmarkIds.map((id) => frame.landmarks[id]?.visibility).filter(Number.isFinite))
+          }
+        : null;
+    })
+    .filter(Boolean);
+  if (measured.length < 6) return { frames: sourceFrames, skipped: 0 };
+
+  const medianSpread = medianNumbers(measured.map((item) => item.spread));
+  const medianMaxBone = medianNumbers(measured.map((item) => item.maxBone));
+  const jumps = measured.slice(1).map((item, index) => skeletonJump(measured[index].normalized, item.normalized));
+  const medianAverageJump = medianNumbers(jumps.map((jump) => jump.average));
+  const medianMaxJump = medianNumbers(jumps.map((jump) => jump.max));
+  const averageJumpLimit = Math.max(0.75, medianAverageJump * 5.5);
+  const maxJumpLimit = Math.max(1.55, medianMaxJump * 6);
+
+  const kept = measured.filter((item, index) => {
+    const spreadRatio = item.spread / Math.max(medianSpread, 0.000001);
+    const boneRatio = item.maxBone / Math.max(medianMaxBone, 0.000001);
+    const previousJump = index > 0 ? skeletonJump(measured[index - 1].normalized, item.normalized) : { average: 0, max: 0 };
+    const nextJump = index < measured.length - 1 ? skeletonJump(item.normalized, measured[index + 1].normalized) : { average: 0, max: 0 };
+    const impossibleAverageJump = previousJump.average > averageJumpLimit && nextJump.average > averageJumpLimit;
+    const impossibleJointJump = previousJump.max > maxJumpLimit && nextJump.max > maxJumpLimit;
+    return (
+      item.visibility >= 0.22 &&
+      spreadRatio >= 0.35 &&
+      spreadRatio <= 2.45 &&
+      boneRatio <= 2.65 &&
+      !impossibleAverageJump &&
+      !impossibleJointJump
+    );
+  });
+
+  if (kept.length < Math.max(4, measured.length * 0.35)) return { frames: sourceFrames, skipped: 0 };
+  return {
+    frames: kept.map((item) => item.frame),
+    skipped: sourceFrames.length - kept.length
+  };
+}
+
+function normalizedSkeletonSpread(landmarks) {
+  const points = coreLandmarkIds.map((id) => landmarks[id]).filter(Boolean);
+  if (!points.length) return 0;
+  return Math.hypot(rangeNumbers(points.map((point) => point.x)), rangeNumbers(points.map((point) => point.y)));
+}
+
+function maxSkeletonBoneLength(landmarks) {
+  const lengths = poseConnections
+    .map(([a, b]) => (landmarks[a] && landmarks[b] ? pointDistance(landmarks[a], landmarks[b]) : null))
+    .filter(Number.isFinite);
+  return lengths.length ? Math.max(...lengths) : 0;
+}
+
+function skeletonJump(previous, current) {
+  const distances = coreLandmarkIds.map((id) => pointDistance(previous[id], current[id])).filter(Number.isFinite);
+  return {
+    average: averageNumbers(distances),
+    max: distances.length ? Math.max(...distances) : 0
+  };
+}
+
+function pointDistance(a, b) {
+  if (!a || !b) return null;
+  return Math.hypot(a.x - b.x, a.y - b.y, (a.z || 0) - (b.z || 0));
+}
+
+function averageNumbers(values) {
+  const clean = values.filter(Number.isFinite);
+  return clean.length ? clean.reduce((sum, value) => sum + value, 0) / clean.length : 0;
+}
+
+function medianNumbers(values) {
+  const clean = values.filter(Number.isFinite).sort((a, b) => a - b);
+  return clean.length ? clean[Math.floor(clean.length / 2)] : 0;
+}
+
+function rangeNumbers(values) {
+  const clean = values.filter(Number.isFinite);
+  return clean.length ? Math.max(...clean) - Math.min(...clean) : 0;
+}
+
+function synchronizedAngleFramePairs(leftScan, rightScan, offset) {
+  const leftFiltered = filterAngleScanFrames(leftScan);
+  const rightFiltered = filterAngleScanFrames(rightScan);
+  const pairs = leftFiltered.frames
+    .map((leftFrame) => {
+      const rightFrame = nearestFrame(rightFiltered.frames, leftFrame.time + offset);
+      if (!rightFrame?.landmarks?.length) return null;
+      return { leftFrame, rightFrame, leftTime: leftFrame.time, rightTime: rightFrame.time };
+    })
+    .filter(Boolean);
+  return {
+    pairs,
+    skipped: leftFiltered.skipped + rightFiltered.skipped,
+    leftSkipped: leftFiltered.skipped,
+    rightSkipped: rightFiltered.skipped
+  };
 }
 
 function regionForLandmark(id) {
@@ -2445,7 +2554,7 @@ function AngleComparisonViewer({ leftScan, rightScan, sync, comparison, regions,
   const [isPlaying, setIsPlaying] = useState(false);
   const pairs = useMemo(() => {
     if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
-    const allPairs = synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
+    const allPairs = synchronizedAngleFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0).pairs;
     const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
     return allPairs.filter((_, index) => index % stride === 0);
   }, [enabled, leftScan, rightScan, sync]);
@@ -2567,6 +2676,11 @@ function AngleComparisonViewer({ leftScan, rightScan, sync, comparison, regions,
               {row.title}: <b>{row.diff}°</b>
             </span>
           ))}
+          {comparison?.diagnostics?.trackingOutliersSkipped > 0 && (
+            <span>
+              Срывы трекинга: <b>{comparison.diagnostics.trackingOutliersSkipped}</b>
+            </span>
+          )}
         </div>
       )}
       <p className="sync-note">
