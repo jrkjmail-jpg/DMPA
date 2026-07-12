@@ -49,7 +49,7 @@ const comparisonModels = {
     title: "Углы",
     shortTitle: "1. Углы",
     description:
-      "Базовая модель: сравнивает углы локтей, плеч, бедер, коленей и корпуса на синхронных кадрах. Хорошо показывает, где именно суставы расходятся."
+      "Базовая модель: сначала точно совмещает корпус правого скелета с эталоном, затем сравнивает углы локтей, плеч, бедер, коленей и корпуса на синхронных кадрах."
   },
   overlay: {
     title: "Наложение",
@@ -273,7 +273,7 @@ function drawVideoSkeleton(ctx, landmarks, canvas, video, side) {
   });
 }
 
-function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regions) {
+function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regions, options = {}) {
   if (!left?.landmarks?.length || !right?.landmarks?.length) {
     return {
       ready: false,
@@ -285,8 +285,9 @@ function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regio
   }
 
   const specs = activeAngleSpecs(regions);
-  const leftAngles = poseAngles(left.landmarks, specs);
-  const rightAngles = poseAngles(right.landmarks, specs);
+  const fitted = torsoFittedLandmarks(left.landmarks, right.landmarks, options.leftAspect, options.rightAspect);
+  const leftAngles = poseAngles(fitted.left, specs);
+  const rightAngles = poseAngles(fitted.right, specs);
   let weightedScore = 0;
   let totalWeight = 0;
 
@@ -309,9 +310,7 @@ function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regio
     })
     .filter(Boolean);
 
-  const centerDiff = normalizedCenterDifference(left.landmarks, right.landmarks);
-  const centerPenalty = Math.min(22, centerDiff * 120);
-  const score = Math.max(0, Math.min(100, Math.round(weightedScore / Math.max(1, totalWeight) - centerPenalty)));
+  const score = Math.max(0, Math.min(100, Math.round(weightedScore / Math.max(1, totalWeight))));
   const worst = [...rows].sort((a, b) => b.diff - a.diff).slice(0, 4);
   const suggestions = worst.map((row) => {
     const side = row.leftValue > row.rightValue ? "у эталона угол больше" : "в правом видео угол больше";
@@ -323,7 +322,21 @@ function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regio
     score,
     rows,
     suggestions,
+    diagnostics: {
+      torsoLocked: fitted.ready
+    },
     verdict: verdictForScore(score, suggestions)
+  };
+}
+
+function torsoFittedLandmarks(leftLandmarks, rightLandmarks, leftAspect = 1, rightAspect = 1) {
+  const left = normalizeSkeleton(leftLandmarks, leftAspect);
+  const right = normalizeSkeleton(rightLandmarks, rightAspect);
+  if (!left?.length || !right?.length) return { left: leftLandmarks, right: rightLandmarks, ready: false };
+  return {
+    left,
+    right: fitNormalizedSkeletonToReference(left, right),
+    ready: true
   };
 }
 
@@ -339,7 +352,10 @@ function compareScans(leftScan, rightScan, sync, regions = defaultMediaPipeSetti
       return {
         leftTime: leftFrame.time,
         rightTime: rightFrame.time,
-        comparison: comparePoseFrames(leftFrame, rightFrame, regions)
+        comparison: comparePoseFrames(leftFrame, rightFrame, regions, {
+          leftAspect: leftScan?.video?.aspect,
+          rightAspect: rightScan?.video?.aspect
+        })
       };
     })
     .filter(Boolean);
