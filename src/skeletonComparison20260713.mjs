@@ -31,6 +31,20 @@ const bones = [
   ["leftShoulder", "rightShoulder", "torso"],
   ["leftHip", "rightHip", "torso"]
 ];
+const stableBoneSpecs = [
+  ["leftUpperArm", "leftShoulder", "leftElbow", 1],
+  ["leftForearm", "leftElbow", "leftWrist", 1],
+  ["rightUpperArm", "rightShoulder", "rightElbow", 1],
+  ["rightForearm", "rightElbow", "rightWrist", 1],
+  ["leftThigh", "leftHip", "leftKnee", 1],
+  ["leftShin", "leftKnee", "leftAnkle", 1],
+  ["rightThigh", "rightHip", "rightKnee", 1],
+  ["rightShin", "rightKnee", "rightAnkle", 1],
+  ["leftTorso", "leftShoulder", "leftHip", 2],
+  ["rightTorso", "rightShoulder", "rightHip", 2],
+  ["shoulders", "leftShoulder", "rightShoulder", 2],
+  ["hips", "leftHip", "rightHip", 2]
+];
 const angleSpecs = [
   ["leftElbow", "leftShoulder", "leftElbow", "leftWrist", "arms"],
   ["rightElbow", "rightShoulder", "rightElbow", "rightWrist", "arms"],
@@ -60,12 +74,24 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
   const rhythmScore = rhythmScoreFor(alignment.path, referenceFrames.length, userFrames.length);
   const bodyParts = bodyPartScores(alignment.path, referenceFrames, userFrames);
   const activityGate = choreographyActivityGate(referenceFrames, userFrames, rangeScore);
+  const trackingQualityGate = trackingQualityGateFor(referencePrepared, userPrepared);
   const evidenceGate = choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, frameHitScore, activityGate });
   const phraseScore = clampScore(keyPoseScore * 0.45 + poseScore * 0.25 + frameHitScore * 0.15 + rhythmScore * 0.15);
   const motionScore = clampScore(trajectoryScore * 0.45 + rangeScore * 0.35 + bodyParts.arms * 0.12 + bodyParts.legs * 0.08);
   const rawScore = clampScore(phraseScore * 0.5 + motionScore * 0.28 + bodyParts.torso * 0.1 + rhythmScore * 0.12);
-  const finalScore = Math.min(rawScore, activityGate.ceiling, evidenceGate.ceiling);
-  const weakPoints = weakPointsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, activityGate, evidenceGate });
+  const finalScore = Math.min(rawScore, activityGate.ceiling, evidenceGate.ceiling, trackingQualityGate.ceiling);
+  const weakPoints = weakPointsFor({
+    poseScore,
+    trajectoryScore,
+    rangeScore,
+    rhythmScore,
+    bodyParts,
+    keyPoseScore,
+    frameHitScore,
+    activityGate,
+    evidenceGate,
+    trackingQualityGate
+  });
   const worst = worstMomentFor(alignment.path, referenceFrames, userFrames);
 
   return {
@@ -92,11 +118,12 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
       limbTemporalGraceFrames,
       activityGate,
       evidenceGate,
+      trackingQualityGate,
       weakPoints,
       missingJoints: [],
       confidence: confidenceFor(referenceFrames, userFrames)
     },
-    rows: rowsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, phraseScore }),
+    rows: rowsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, phraseScore, trackingQualityGate }),
     suggestions: weakPoints,
     framesCompared: alignment.path.length,
     bestScore: clampScore(100 * Math.exp(-alignment.bestCost * 1.85)),
@@ -107,21 +134,21 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
   };
 }
 
+export function filterSkeletonFrames_2026_07_13(input) {
+  const frames = normalizeInput(input);
+  const mapped = frames
+    .map((frame, index) => mapRawFrameForQuality(frame, index))
+    .filter((frame) => frame.landmarks)
+    .map(addQualityMeasurements);
+  return filterTrackingOutliers(mapped).frames.map((frame) => frame.source);
+}
+
 function prepareSequence(input, maxFrames) {
   const frames = normalizeInput(input);
   const mapped = frames
-    .map((frame, index) => ({
-      timestampMs: frameTimeMs(frame, index),
-      landmarks: landmarkMap(frame.joints || frame.landmarks || frame.points || frame),
-      confidence: Number(frame.confidence || 0)
-    }))
+    .map((frame, index) => mapRawFrameForQuality(frame, index))
     .filter((frame) => frame.landmarks)
-    .map((frame) => ({
-      ...frame,
-      bodyScale: bodyScale(frame.landmarks),
-      spread: skeletonSpread(frame.landmarks),
-      visibility: landmarkVisibility(frame.landmarks)
-    }));
+    .map(addQualityMeasurements);
   const filtered = filterTrackingOutliers(mapped);
   const scale = stableScale(filtered.frames);
   const preparedFrames = sampleEvenly(filtered.frames, maxFrames).map((frame) => {
@@ -135,7 +162,27 @@ function prepareSequence(input, maxFrames) {
   });
   return {
     frames: preparedFrames,
-    skippedFrames: filtered.skippedFrames
+    skippedFrames: filtered.skippedFrames,
+    inputFrames: mapped.length
+  };
+}
+
+function mapRawFrameForQuality(frame, index) {
+  return {
+    source: frame,
+    timestampMs: frameTimeMs(frame, index),
+    landmarks: landmarkMap(frame.joints || frame.landmarks || frame.points || frame),
+    confidence: Number(frame.confidence || 0)
+  };
+}
+
+function addQualityMeasurements(frame) {
+  return {
+    ...frame,
+    bodyScale: bodyScale(frame.landmarks),
+    spread: skeletonSpread(frame.landmarks),
+    visibility: landmarkVisibility(frame.landmarks),
+    boneLengths: stableBoneLengths(frame.landmarks)
   };
 }
 
@@ -203,6 +250,9 @@ function filterTrackingOutliers(frames) {
   if (frames.length < 6) return { frames, skippedFrames: 0 };
   const medianScale = median(frames.map((frame) => frame.bodyScale).filter((value) => value > 0));
   const medianSpread = median(frames.map((frame) => frame.spread).filter((value) => value > 0));
+  const medianBoneLengths = Object.fromEntries(
+    stableBoneSpecs.map(([id]) => [id, median(frames.map((frame) => frame.boneLengths[id]).filter((value) => value > 0))])
+  );
   const medianStep = median(
     frames
       .slice(1)
@@ -226,18 +276,36 @@ function filterTrackingOutliers(frames) {
     const maxJumpLimit = Math.max(2.2, medianMaxStep * 6.5);
     const isolatedJump = previousJump > jumpLimit && nextJump > jumpLimit;
     const impossibleJointJump = previousMaxJump > maxJumpLimit && nextMaxJump > maxJumpLimit;
+    const boneBreaks = skeletonBoneBreaks(frame, medianBoneLengths);
     return (
       frame.visibility >= 0.28 &&
       scaleRatio >= 0.42 &&
       scaleRatio <= 2.35 &&
       spreadRatio >= 0.35 &&
       spreadRatio <= 2.75 &&
+      boneBreaks <= 1 &&
       !isolatedJump &&
       !impossibleJointJump
     );
   });
   if (kept.length < Math.max(4, frames.length * 0.35)) return { frames, skippedFrames: 0 };
   return { frames: kept, skippedFrames: frames.length - kept.length };
+}
+
+function stableBoneLengths(points) {
+  return Object.fromEntries(stableBoneSpecs.map(([id, from, to]) => [id, distance(points[from], points[to])]));
+}
+
+function skeletonBoneBreaks(frame, medianBoneLengths) {
+  let breaks = 0;
+  for (const [id, , , weight] of stableBoneSpecs) {
+    const lengthValue = frame.boneLengths[id];
+    const medianValue = medianBoneLengths[id];
+    if (!Number.isFinite(lengthValue) || !Number.isFinite(medianValue) || medianValue <= 0.000001) continue;
+    const ratioValue = lengthValue / medianValue;
+    if (ratioValue > 2.2 || ratioValue < 0.32) breaks += weight;
+  }
+  return breaks;
 }
 
 function skeletonSpread(points) {
@@ -560,6 +628,22 @@ function choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, f
   return { ceiling, reason };
 }
 
+function trackingQualityGateFor(referencePrepared, userPrepared) {
+  const referenceRatio = referencePrepared.inputFrames ? referencePrepared.skippedFrames / referencePrepared.inputFrames : 0;
+  const userRatio = userPrepared.inputFrames ? userPrepared.skippedFrames / userPrepared.inputFrames : 0;
+  const worstRatio = Math.max(referenceRatio, userRatio);
+  let ceiling = 100;
+  if (worstRatio >= 0.25) ceiling = 55;
+  else if (worstRatio >= 0.18) ceiling = 65;
+  else if (worstRatio >= 0.1) ceiling = 76;
+  return {
+    ceiling,
+    referenceSkippedRatio: Number(referenceRatio.toFixed(2)),
+    userSkippedRatio: Number(userRatio.toFixed(2)),
+    worstSkippedRatio: Number(worstRatio.toFixed(2))
+  };
+}
+
 function sequenceActivity(frames) {
   const values = [];
   for (let index = 1; index < frames.length; index += 1) {
@@ -622,9 +706,10 @@ function bestFittedFrameForPart(referenceFrame, userFrames, userIndex, part) {
   );
 }
 
-function rowsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, phraseScore }) {
+function rowsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, phraseScore, trackingQualityGate }) {
   return [
     row("2026-07-13-phrase", "13.07.2026: хореографическая фраза", phraseScore),
+    row("2026-07-13-tracking-quality", "13.07.2026: надежность скана", trackingQualityGate?.ceiling ?? 100),
     row("2026-07-13-key-poses", "13.07.2026: ключевые позы", keyPoseScore),
     row("2026-07-13-pose", "13.07.2026: форма тела", poseScore),
     row("2026-07-13-frame-hit", "13.07.2026: попадание в кадры", frameHitScore),
@@ -640,8 +725,22 @@ function row(id, title, score) {
   return { id, title, leftValue: rounded, rightValue: 100, diff: 100 - rounded, unit: "%", score: rounded };
 }
 
-function weakPointsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, activityGate, evidenceGate }) {
+function weakPointsFor({
+  poseScore,
+  trajectoryScore,
+  rangeScore,
+  rhythmScore,
+  bodyParts,
+  keyPoseScore,
+  frameHitScore,
+  activityGate,
+  evidenceGate,
+  trackingQualityGate
+}) {
   const weak = [];
+  if (trackingQualityGate?.ceiling < 90) {
+    weak.push(`Скан недостоверен: отброшено до ${Math.round((trackingQualityGate.worstSkippedRatio || 0) * 100)}% кадров, потолок оценки ${trackingQualityGate.ceiling}%.`);
+  }
   if (activityGate?.ceiling < 90) weak.push(`Активность движения ниже эталона: потолок оценки ${activityGate.ceiling}%.`);
   if (evidenceGate?.ceiling < 90) weak.push(`Двигательная фраза ограничила оценку: ${evidenceGate.reason.join(", ")}.`);
   if (keyPoseScore < 74) weak.push(`Ключевые позы читаются слабее эталона: ${keyPoseScore}%.`);

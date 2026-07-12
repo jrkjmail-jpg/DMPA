@@ -12,7 +12,7 @@ import { Camera, FileVideo, Pause, Play, RotateCcw, ScanLine, Sparkles, Wand2, W
 import { DrawingUtils, FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
 import { compareSkeletons_2026_07_06 } from "./skeletonComparison20260706.mjs";
 import { compareSkeletons_2026_07_12 } from "./skeletonComparison20260712.mjs";
-import { compareSkeletons_2026_07_13 } from "./skeletonComparison20260713.mjs";
+import { compareSkeletons_2026_07_13, filterSkeletonFrames_2026_07_13 } from "./skeletonComparison20260713.mjs";
 import "./styles.css";
 
 const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
@@ -2806,10 +2806,14 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
   const [isPlaying, setIsPlaying] = useState(false);
   const pairs = useMemo(() => {
     if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
-    const allPairs = synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
+    const cleanedLeftScan =
+      modelId === "2026-07-13" ? { ...leftScan, frames: filterSkeletonFrames_2026_07_13(leftScan) } : leftScan;
+    const cleanedRightScan =
+      modelId === "2026-07-13" ? { ...rightScan, frames: filterSkeletonFrames_2026_07_13(rightScan) } : rightScan;
+    const allPairs = synchronizedFramePairs(cleanedLeftScan, cleanedRightScan, sync?.ready ? sync.offsetSeconds : 0);
     const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
     return allPairs.filter((_, index) => index % stride === 0);
-  }, [enabled, leftScan, rightScan, sync]);
+  }, [enabled, leftScan, modelId, rightScan, sync]);
   const pair = pairs[currentIndex] || null;
 
   useEffect(() => {
