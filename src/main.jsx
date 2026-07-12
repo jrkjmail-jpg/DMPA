@@ -41,8 +41,28 @@ const defaultMediaPipeSettings = {
   regions: {
     arms: true,
     torso: true,
-    legs: true
+    legs: true,
+    hands: false,
+    face: false
   }
+};
+
+const mediaPipeHelp = {
+  modelVariant:
+    "Выбор версии MediaPipe Pose. Lite быстрее и легче для телефона, Full дает баланс, Heavy точнее, но сильнее нагружает устройство.",
+  delegate: "Где считать модель: GPU обычно быстрее, CPU полезен, если видеокарта или браузер работают нестабильно.",
+  numPoses: "Сколько людей MediaPipe пытается найти в кадре. Для сравнения одного танцора обычно оставляем 1.",
+  scanFps: "Сколько кадров в секунду сохранять в скелет. Чем выше FPS, тем точнее движение, но дольше сканирование и тяжелее файл.",
+  landmarkSet: "Сколько точек сохранять в датасет: 13 ключевых точек легче, 33 точки дают больше деталей MediaPipe Pose.",
+  outputSegmentationMasks: "Маска тела отделяет человека от фона. Для сравнения скелетов обычно не обязательна и может замедлять сканирование.",
+  minPoseDetectionConfidence: "Минимальная уверенность первичного обнаружения человека в кадре. Выше значение строже, но может терять сложные позы.",
+  minPosePresenceConfidence: "Минимальная уверенность, что поза действительно присутствует в текущем кадре. Влияет на пропуск сомнительных кадров.",
+  minTrackingConfidence: "Минимальная уверенность сопровождения уже найденной позы между кадрами. Выше значение уменьшает шум, но может чаще терять тело.",
+  regions: "Какие зоны тела учитывать в сравнении и сохранять как настройки эксперимента.",
+  hands:
+    "MediaPipe Hands нужен для детального анализа кистей и пальцев. Сейчас это отдельный флаг лаборатории; базовые запястья и пальцы Pose уже есть в 33 точках.",
+  face:
+    "MediaPipe Face Landmarker нужен для детального анализа лица. Сейчас это отдельный флаг лаборатории; базовые точки лица Pose доступны только грубо."
 };
 
 const comparisonModels = {
@@ -1917,17 +1937,12 @@ const VideoPane = forwardRef(function VideoPane(
               {formatTime(analysisRange.start)} - {formatTime(analysisRange.end)}
             </span>
           </div>
-          <div className="range-track">
-            <i
-              style={{
-                left: `${(analysisRange.start / duration) * 100}%`,
-                width: `${Math.max(0, ((analysisRange.end - analysisRange.start) / duration) * 100)}%`
-              }}
-            />
-          </div>
-          <label>
-            Начало
+          <div className="dual-range" style={{ "--start": `${(analysisRange.start / duration) * 100}%`, "--end": `${(analysisRange.end / duration) * 100}%` }}>
+            <div className="range-track">
+              <i />
+            </div>
             <input
+              aria-label="Начало диапазона анализа"
               type="range"
               min="0"
               max={duration}
@@ -1940,10 +1955,8 @@ const VideoPane = forwardRef(function VideoPane(
                 })
               }
             />
-          </label>
-          <label>
-            Конец
             <input
+              aria-label="Конец диапазона анализа"
               type="range"
               min="0"
               max={duration}
@@ -1956,30 +1969,6 @@ const VideoPane = forwardRef(function VideoPane(
                 })
               }
             />
-          </label>
-          <div className="range-actions">
-            <button
-              type="button"
-              onClick={() =>
-                onAnalysisRangeChange({
-                  start: Math.min(videoRef.current?.currentTime || 0, analysisRange.end - 0.1),
-                  end: analysisRange.end
-                })
-              }
-            >
-              Начало = текущий кадр
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                onAnalysisRangeChange({
-                  start: analysisRange.start,
-                  end: Math.max(videoRef.current?.currentTime || duration, analysisRange.start + 0.1)
-                })
-              }
-            >
-              Конец = текущий кадр
-            </button>
           </div>
         </div>
       )}
@@ -2107,12 +2096,20 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
   const update = (patch) => onChange(normalizeMediaPipeSettings({ ...settings, ...patch }));
   const updateNumber = (key, value) => update({ [key]: Number(value) });
   const updateRegion = (key, checked) => update({ regions: { ...settings.regions, [key]: checked } });
+  const FieldTitle = ({ children, help }) => (
+    <span className="setting-label">
+      {children}
+      <span className="help-dot" tabIndex="0" aria-label={help} data-help={help}>
+        ?
+      </span>
+    </span>
+  );
 
   return (
     <section className="settings-panel">
       <div className="settings-title">
         <div>
-          <p className="eyebrow">MediaPipe Settings</p>
+          <p className="eyebrow">Настройки MediaPipe</p>
           <h2>Параметры трекинга и датасета</h2>
         </div>
         <span className={`status ${isReady ? "status-good" : ""}`}>{isReady ? "модель активна" : "модель загружается"}</span>
@@ -2120,22 +2117,22 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
 
       <div className="settings-grid">
         <label>
-          Модель Pose Landmarker
+          <FieldTitle help={mediaPipeHelp.modelVariant}>Модель распознавания позы</FieldTitle>
           <select value={settings.modelVariant} onChange={(event) => update({ modelVariant: event.target.value })}>
-            <option value="lite">Lite - быстрее</option>
-            <option value="full">Full - баланс</option>
-            <option value="heavy">Heavy - точнее, медленнее</option>
+            <option value="lite">Легкая - быстрее</option>
+            <option value="full">Полная - баланс</option>
+            <option value="heavy">Тяжелая - точнее, медленнее</option>
           </select>
         </label>
         <label>
-          Вычисление
+          <FieldTitle help={mediaPipeHelp.delegate}>Устройство вычисления</FieldTitle>
           <select value={settings.delegate} onChange={(event) => update({ delegate: event.target.value })}>
-            <option value="GPU">GPU</option>
-            <option value="CPU">CPU</option>
+            <option value="GPU">Видеокарта</option>
+            <option value="CPU">Процессор</option>
           </select>
         </label>
         <label>
-          Максимум поз
+          <FieldTitle help={mediaPipeHelp.numPoses}>Количество людей в кадре</FieldTitle>
           <input
             type="number"
             min="1"
@@ -2145,7 +2142,7 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
           />
         </label>
         <label>
-          FPS сканирования
+          <FieldTitle help={mediaPipeHelp.scanFps}>Частота сканирования</FieldTitle>
           <select value={settings.scanFps} onChange={(event) => updateNumber("scanFps", event.target.value)}>
             <option value="2">2 кадра/сек</option>
             <option value="3">3 кадра/сек</option>
@@ -2155,7 +2152,7 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
           </select>
         </label>
         <label>
-          Точки в датасете
+          <FieldTitle help={mediaPipeHelp.landmarkSet}>Точки скелета в датасете</FieldTitle>
           <select value={settings.landmarkSet} onChange={(event) => update({ landmarkSet: event.target.value })}>
             <option value="core13">13 ключевых точек</option>
             <option value="full33">Все 33 точки MediaPipe</option>
@@ -2167,10 +2164,10 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
             checked={settings.outputSegmentationMasks}
             onChange={(event) => update({ outputSegmentationMasks: event.target.checked })}
           />
-          Маска сегментации тела
+          <FieldTitle help={mediaPipeHelp.outputSegmentationMasks}>Маска сегментации тела</FieldTitle>
         </label>
         <label>
-          Detection confidence
+          <FieldTitle help={mediaPipeHelp.minPoseDetectionConfidence}>Уверенность обнаружения</FieldTitle>
           <input
             type="range"
             min="0.1"
@@ -2182,7 +2179,7 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
           <small>{settings.minPoseDetectionConfidence.toFixed(2)}</small>
         </label>
         <label>
-          Presence confidence
+          <FieldTitle help={mediaPipeHelp.minPosePresenceConfidence}>Уверенность присутствия позы</FieldTitle>
           <input
             type="range"
             min="0.1"
@@ -2194,7 +2191,7 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
           <small>{settings.minPosePresenceConfidence.toFixed(2)}</small>
         </label>
         <label>
-          Tracking confidence
+          <FieldTitle help={mediaPipeHelp.minTrackingConfidence}>Уверенность сопровождения</FieldTitle>
           <input
             type="range"
             min="0.1"
@@ -2208,7 +2205,12 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
       </div>
 
       <div className="region-settings">
-        <strong>Области сравнения</strong>
+        <strong>
+          Области сравнения
+          <span className="help-dot" tabIndex="0" aria-label={mediaPipeHelp.regions} data-help={mediaPipeHelp.regions}>
+            ?
+          </span>
+        </strong>
         <label>
           <input type="checkbox" checked={settings.regions.arms} onChange={(event) => updateRegion("arms", event.target.checked)} />
           Руки и плечи
@@ -2220,6 +2222,20 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
         <label>
           <input type="checkbox" checked={settings.regions.legs} onChange={(event) => updateRegion("legs", event.target.checked)} />
           Ноги и колени
+        </label>
+        <label>
+          <input type="checkbox" checked={settings.regions.hands} onChange={(event) => updateRegion("hands", event.target.checked)} />
+          Кисти MediaPipe Hands
+          <span className="help-dot" tabIndex="0" aria-label={mediaPipeHelp.hands} data-help={mediaPipeHelp.hands}>
+            ?
+          </span>
+        </label>
+        <label>
+          <input type="checkbox" checked={settings.regions.face} onChange={(event) => updateRegion("face", event.target.checked)} />
+          Лицо MediaPipe Face
+          <span className="help-dot" tabIndex="0" aria-label={mediaPipeHelp.face} data-help={mediaPipeHelp.face}>
+            ?
+          </span>
         </label>
         <span>
           MediaPipe возвращает 33 точки. В сравнении сейчас активно {specs.length} углов, в датасет сохраняется{" "}
