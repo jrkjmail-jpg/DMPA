@@ -1772,12 +1772,10 @@ const VideoPane = forwardRef(function VideoPane(
     video.src = URL.createObjectURL(file);
     video.loop = true;
     video.muted = isMuted;
-    video.play().catch(() => {
-      video.muted = true;
-      setIsMuted(true);
-      return video.play();
-    });
-    setIsPlaying(true);
+    video.pause();
+    video.currentTime = 0;
+    setCurrentTime(0);
+    setIsPlaying(false);
     setMode("file");
     setSourceName(file.name);
     setError("");
