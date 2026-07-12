@@ -69,17 +69,19 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
   const poseScore = clampScore(100 * Math.exp(-alignment.robustCost * 1.85));
   const frameHitScore = frameHitScoreFor(alignment.costs);
   const keyPoseScore = keyPoseScoreFor(alignment.path, referenceFrames, userFrames);
+  const anglePatternScore = anglePatternScoreFor(alignment.path, referenceFrames, userFrames);
   const trajectoryScore = robustTrajectoryScoreFor(alignment.path, referenceFrames, userFrames);
   const rangeScore = motionRangeScore(referenceFrames, userFrames);
   const rhythmScore = rhythmScoreFor(alignment.path, referenceFrames.length, userFrames.length);
   const bodyParts = bodyPartScores(alignment.path, referenceFrames, userFrames);
   const activityGate = choreographyActivityGate(referenceFrames, userFrames, rangeScore);
   const trackingQualityGate = trackingQualityGateFor(referencePrepared, userPrepared);
-  const evidenceGate = choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, frameHitScore, activityGate });
-  const phraseScore = clampScore(keyPoseScore * 0.45 + poseScore * 0.25 + frameHitScore * 0.15 + rhythmScore * 0.15);
-  const motionScore = clampScore(trajectoryScore * 0.45 + rangeScore * 0.35 + bodyParts.arms * 0.12 + bodyParts.legs * 0.08);
-  const rawScore = clampScore(phraseScore * 0.5 + motionScore * 0.28 + bodyParts.torso * 0.1 + rhythmScore * 0.12);
-  const finalScore = Math.min(rawScore, activityGate.ceiling, evidenceGate.ceiling, trackingQualityGate.ceiling);
+  const evidenceGate = choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, frameHitScore, anglePatternScore, activityGate });
+  const phraseScore = clampScore(anglePatternScore * 0.34 + keyPoseScore * 0.26 + poseScore * 0.18 + frameHitScore * 0.1 + rhythmScore * 0.12);
+  const motionScore = clampScore(anglePatternScore * 0.35 + trajectoryScore * 0.22 + rangeScore * 0.25 + bodyParts.arms * 0.1 + bodyParts.legs * 0.08);
+  const rawScore = clampScore(phraseScore * 0.56 + motionScore * 0.24 + bodyParts.torso * 0.08 + rhythmScore * 0.12);
+  const stableExecutionScore = stableExecutionScoreFor({ bodyParts, rangeScore, rhythmScore, keyPoseScore, poseScore });
+  const finalScore = Math.min(Math.max(rawScore, stableExecutionScore), activityGate.ceiling, evidenceGate.ceiling);
   const weakPoints = weakPointsFor({
     poseScore,
     trajectoryScore,
@@ -107,7 +109,9 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
     rangeScore,
     keyPoseScore,
     frameHitScore,
+    anglePatternScore,
     phraseScore,
+    stableExecutionScore,
     bodyParts,
     diagnostics: {
       averageTimeOffsetMs: Math.round(average(alignment.path.map(([i, j]) => Math.abs(referenceFrames[i].timestampMs - userFrames[j].timestampMs)))),
@@ -123,7 +127,19 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
       missingJoints: [],
       confidence: confidenceFor(referenceFrames, userFrames)
     },
-    rows: rowsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, phraseScore, trackingQualityGate }),
+    rows: rowsFor({
+      poseScore,
+      trajectoryScore,
+      rangeScore,
+      rhythmScore,
+      bodyParts,
+      keyPoseScore,
+      frameHitScore,
+      anglePatternScore,
+      phraseScore,
+      stableExecutionScore,
+      trackingQualityGate
+    }),
     suggestions: weakPoints,
     framesCompared: alignment.path.length,
     bestScore: clampScore(100 * Math.exp(-alignment.bestCost * 1.85)),
@@ -592,6 +608,60 @@ function keyPoseIndexes(frames) {
   return selected.sort((a, b) => a - b).slice(0, 24);
 }
 
+function anglePatternScoreFor(path, referenceFrames, userFrames) {
+  const poseScores = [];
+  const motionScores = [];
+  for (let index = 0; index < path.length; index += 1) {
+    const [i, j] = path[index];
+    const left = referenceFrames[i];
+    const right = bestAngleFrameFor(referenceFrames[i], userFrames, j);
+    if (!right) continue;
+    for (const [key, , , , part] of angleSpecs) {
+      const leftAngle = left.angles[key];
+      const rightAngle = right.angles[key];
+      if (!Number.isFinite(leftAngle) || !Number.isFinite(rightAngle)) continue;
+      const tolerance = part === "arms" ? 52 : part === "legs" ? 44 : 36;
+      poseScores.push(100 * Math.exp(-Math.pow(Math.abs(leftAngle - rightAngle) / tolerance, 2)));
+    }
+    if (index > 0) {
+      const [previousI, previousJ] = path[index - 1];
+      const previousLeft = referenceFrames[previousI];
+      const previousRight = bestAngleFrameFor(referenceFrames[previousI], userFrames, previousJ) || userFrames[previousJ];
+      for (const [key, , , , part] of angleSpecs) {
+        const leftDelta = left.angles[key] - previousLeft.angles[key];
+        const rightDelta = right.angles[key] - previousRight.angles[key];
+        if (!Number.isFinite(leftDelta) || !Number.isFinite(rightDelta) || Math.abs(leftDelta) < 1.2) continue;
+        const sameDirection = Math.sign(leftDelta) === Math.sign(rightDelta) ? 100 : 32;
+        const amplitude = ratioScore(Math.abs(leftDelta), Math.abs(rightDelta));
+        motionScores.push(sameDirection * 0.45 + amplitude * 0.55 + (part === "arms" ? 4 : 0));
+      }
+    }
+  }
+  const pose = poseScores.length ? robustAverage(poseScores, 0.12) : 0;
+  const motion = motionScores.length ? robustAverage(motionScores, 0.16) : 0;
+  return clampScore(pose * 0.72 + motion * 0.28);
+}
+
+function bestAngleFrameFor(referenceFrame, userFrames, userIndex) {
+  const candidates = [];
+  for (let offset = -2; offset <= 2; offset += 1) {
+    const frame = userFrames[userIndex + offset];
+    if (frame?.angles) candidates.push(frame);
+  }
+  if (!candidates.length) return null;
+  return minBy(candidates, (frame) =>
+    average(
+      angleSpecs
+        .map(([key]) => {
+          const left = referenceFrame.angles[key];
+          const right = frame.angles[key];
+          return Number.isFinite(left) && Number.isFinite(right) ? Math.abs(left - right) : null;
+        })
+        .filter(Number.isFinite)
+    )
+  );
+}
+
 function choreographyActivityGate(referenceFrames, userFrames, rangeScore) {
   const referenceActivity = sequenceActivity(referenceFrames);
   const userActivity = sequenceActivity(userFrames);
@@ -608,16 +678,19 @@ function choreographyActivityGate(referenceFrames, userFrames, rangeScore) {
   };
 }
 
-function choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, frameHitScore, activityGate }) {
+function choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, frameHitScore, anglePatternScore, activityGate }) {
   let ceiling = 100;
   const reason = [];
   if (trajectoryScore < 38 && rangeScore < 25) {
     ceiling = 32;
     reason.push("движение почти не повторяет траекторию и амплитуду эталона");
   } else if (trajectoryScore < 50) {
-    ceiling = Math.min(ceiling, rangeScore < 55 ? 52 : keyPoseScore >= 70 ? 78 : 68);
+    const strongChoreographyEvidence = rangeScore >= 80 && keyPoseScore >= 70 && frameHitScore >= 72;
+    if (rangeScore < 80) ceiling = Math.min(ceiling, 80);
+    else if (!strongChoreographyEvidence && anglePatternScore < 76) ceiling = Math.min(ceiling, 82);
+    else ceiling = Math.min(ceiling, 92);
     reason.push("траектория движения не подтверждает ту же хореографическую фразу");
-  } else if (trajectoryScore < 62 && Math.min(keyPoseScore, frameHitScore) < 72) {
+  } else if (trajectoryScore < 62 && Math.min(keyPoseScore, frameHitScore, anglePatternScore) < 72) {
     ceiling = Math.min(ceiling, 74);
     reason.push("ключевые позы и траектория одновременно слабые");
   }
@@ -626,6 +699,18 @@ function choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, f
     reason.push("активность ученика заметно ниже эталона");
   }
   return { ceiling, reason };
+}
+
+function stableExecutionScoreFor({ bodyParts, rangeScore, rhythmScore, keyPoseScore, poseScore }) {
+  return clampScore(
+    (bodyParts.arms || 0) * 0.24 +
+      (bodyParts.legs || 0) * 0.18 +
+      (bodyParts.torso || 0) * 0.08 +
+      rangeScore * 0.22 +
+      rhythmScore * 0.18 +
+      keyPoseScore * 0.07 +
+      poseScore * 0.03
+  );
 }
 
 function trackingQualityGateFor(referencePrepared, userPrepared) {
@@ -706,16 +791,30 @@ function bestFittedFrameForPart(referenceFrame, userFrames, userIndex, part) {
   );
 }
 
-function rowsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts, keyPoseScore, frameHitScore, phraseScore, trackingQualityGate }) {
+function rowsFor({
+  poseScore,
+  trajectoryScore,
+  rangeScore,
+  rhythmScore,
+  bodyParts,
+  keyPoseScore,
+  frameHitScore,
+  anglePatternScore,
+  phraseScore,
+  stableExecutionScore,
+  trackingQualityGate
+}) {
   return [
     row("2026-07-13-phrase", "13.07.2026: хореографическая фраза", phraseScore),
-    row("2026-07-13-tracking-quality", "13.07.2026: надежность скана", trackingQualityGate?.ceiling ?? 100),
+    row("2026-07-13-stable-execution", "13.07.2026: устойчивое исполнение", stableExecutionScore),
+    row("2026-07-13-angle-pattern", "13.07.2026: рисунок углов", anglePatternScore),
     row("2026-07-13-key-poses", "13.07.2026: ключевые позы", keyPoseScore),
     row("2026-07-13-pose", "13.07.2026: форма тела", poseScore),
     row("2026-07-13-frame-hit", "13.07.2026: попадание в кадры", frameHitScore),
     row("2026-07-13-trajectory", "13.07.2026: траектория без микрошумов", trajectoryScore),
     row("2026-07-13-range", "13.07.2026: амплитуда движения", rangeScore),
     row("2026-07-13-rhythm", "13.07.2026: музыкальная синхронность", rhythmScore),
+    row("2026-07-13-tracking-quality", "13.07.2026: надежность скана", trackingQualityGate?.ceiling ?? 100),
     ...Object.entries(bodyParts).map(([part, score]) => row(`2026-07-13-${part}`, bodyPartTitle(part), score))
   ];
 }
@@ -739,7 +838,7 @@ function weakPointsFor({
 }) {
   const weak = [];
   if (trackingQualityGate?.ceiling < 90) {
-    weak.push(`Скан недостоверен: отброшено до ${Math.round((trackingQualityGate.worstSkippedRatio || 0) * 100)}% кадров, потолок оценки ${trackingQualityGate.ceiling}%.`);
+    weak.push(`Скан требует осторожности: отброшено до ${Math.round((trackingQualityGate.worstSkippedRatio || 0) * 100)}% кадров.`);
   }
   if (activityGate?.ceiling < 90) weak.push(`Активность движения ниже эталона: потолок оценки ${activityGate.ceiling}%.`);
   if (evidenceGate?.ceiling < 90) weak.push(`Двигательная фраза ограничила оценку: ${evidenceGate.reason.join(", ")}.`);
