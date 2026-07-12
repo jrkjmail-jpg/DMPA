@@ -743,6 +743,7 @@ function filterAngleScanFrames(scan) {
             normalized,
             spread: normalizedSkeletonSpread(normalized),
             maxBone: maxSkeletonBoneLength(normalized),
+            boneLengths: skeletonBoneLengths(normalized),
             visibility: averageNumbers(coreLandmarkIds.map((id) => frame.landmarks[id]?.visibility).filter(Number.isFinite))
           }
         : null;
@@ -752,11 +753,15 @@ function filterAngleScanFrames(scan) {
 
   const medianSpread = medianNumbers(measured.map((item) => item.spread));
   const medianMaxBone = medianNumbers(measured.map((item) => item.maxBone));
+  const medianBoneLengths = Object.fromEntries(
+    stableBoneSpecs.map((bone) => [bone.id, medianNumbers(measured.map((item) => item.boneLengths[bone.id]))])
+  );
   const jumps = measured.slice(1).map((item, index) => skeletonJump(measured[index].normalized, item.normalized));
   const medianAverageJump = medianNumbers(jumps.map((jump) => jump.average));
   const medianMaxJump = medianNumbers(jumps.map((jump) => jump.max));
   const averageJumpLimit = Math.max(0.75, medianAverageJump * 5.5);
   const maxJumpLimit = Math.max(1.55, medianMaxJump * 6);
+  const localJumpLimit = Math.max(0.62, medianAverageJump * 4.25);
 
   const kept = measured.filter((item, index) => {
     const spreadRatio = item.spread / Math.max(medianSpread, 0.000001);
@@ -765,13 +770,17 @@ function filterAngleScanFrames(scan) {
     const nextJump = index < measured.length - 1 ? skeletonJump(item.normalized, measured[index + 1].normalized) : { average: 0, max: 0 };
     const impossibleAverageJump = previousJump.average > averageJumpLimit && nextJump.average > averageJumpLimit;
     const impossibleJointJump = previousJump.max > maxJumpLimit && nextJump.max > maxJumpLimit;
+    const shortTrackingRun = localTrackingRunIsBroken(measured, index, localJumpLimit, maxJumpLimit);
+    const anatomyBreaks = skeletonAnatomyBreaks(item, medianBoneLengths);
     return (
       item.visibility >= 0.22 &&
       spreadRatio >= 0.35 &&
       spreadRatio <= 2.45 &&
       boneRatio <= 2.65 &&
+      anatomyBreaks <= 2 &&
       !impossibleAverageJump &&
-      !impossibleJointJump
+      !impossibleJointJump &&
+      !shortTrackingRun
     );
   });
 
@@ -780,6 +789,84 @@ function filterAngleScanFrames(scan) {
     frames: kept.map((item) => item.frame),
     skipped: sourceFrames.length - kept.length
   };
+}
+
+const stableBoneSpecs = [
+  { id: "leftUpperArm", points: [11, 13] },
+  { id: "leftForearm", points: [13, 15] },
+  { id: "rightUpperArm", points: [12, 14] },
+  { id: "rightForearm", points: [14, 16] },
+  { id: "leftThigh", points: [23, 25] },
+  { id: "leftShin", points: [25, 27] },
+  { id: "rightThigh", points: [24, 26] },
+  { id: "rightShin", points: [26, 28] },
+  { id: "leftTorso", points: [11, 23] },
+  { id: "rightTorso", points: [12, 24] },
+  { id: "shoulders", points: [11, 12] },
+  { id: "hips", points: [23, 24] }
+];
+
+function skeletonBoneLengths(landmarks) {
+  return Object.fromEntries(
+    stableBoneSpecs.map((bone) => [bone.id, pointDistance(landmarks?.[bone.points[0]], landmarks?.[bone.points[1]])])
+  );
+}
+
+function skeletonAnatomyBreaks(item, medianBoneLengths) {
+  const lengths = item.boneLengths || {};
+  let breaks = 0;
+  for (const bone of stableBoneSpecs) {
+    const length = lengths[bone.id];
+    const medianLength = medianBoneLengths[bone.id];
+    if (!Number.isFinite(length) || !Number.isFinite(medianLength) || medianLength <= 0.000001) continue;
+    const ratio = length / medianLength;
+    if (ratio > 2.25 || ratio < 0.18) breaks += bone.id.includes("Torso") || bone.id === "shoulders" || bone.id === "hips" ? 2 : 1;
+  }
+  breaks += limbChainBreaks(item.normalized);
+  return breaks;
+}
+
+function limbChainBreaks(landmarks) {
+  const chains = [
+    [11, 13, 15],
+    [12, 14, 16],
+    [23, 25, 27],
+    [24, 26, 28]
+  ];
+  return chains.reduce((count, [root, middle, end]) => {
+    const rootToMiddle = pointDistance(landmarks?.[root], landmarks?.[middle]);
+    const middleToEnd = pointDistance(landmarks?.[middle], landmarks?.[end]);
+    const rootToEnd = pointDistance(landmarks?.[root], landmarks?.[end]);
+    if (![rootToMiddle, middleToEnd, rootToEnd].every(Number.isFinite)) return count;
+    const chainLength = rootToMiddle + middleToEnd;
+    if (chainLength <= 0.000001) return count + 1;
+    const foldedRatio = rootToEnd / chainLength;
+    const segmentRatio = Math.max(rootToMiddle, middleToEnd) / Math.max(0.000001, Math.min(rootToMiddle, middleToEnd));
+    return count + (foldedRatio < 0.045 || segmentRatio > 6.5 ? 1 : 0);
+  }, 0);
+}
+
+function localTrackingRunIsBroken(measured, index, averageLimit, maxLimit) {
+  const previous = measured[index - 1];
+  const next = measured[index + 1];
+  if (!previous || !next) return false;
+  const previousToCurrent = skeletonJump(previous.normalized, measured[index].normalized);
+  const currentToNext = skeletonJump(measured[index].normalized, next.normalized);
+  if (previousToCurrent.average > averageLimit && currentToNext.average > averageLimit) return true;
+  if (previousToCurrent.max > maxLimit && currentToNext.max > maxLimit) return true;
+
+  const before = measured[index - 2];
+  const after = measured[index + 2];
+  if (!before || !after) return false;
+  const beforeJump = skeletonJump(before.normalized, measured[index].normalized);
+  const afterJump = skeletonJump(measured[index].normalized, after.normalized);
+  const bridgeJump = skeletonJump(before.normalized, after.normalized);
+  const shortBadIsland =
+    beforeJump.average > averageLimit &&
+    afterJump.average > averageLimit &&
+    bridgeJump.average < averageLimit * 0.9;
+  const shortBadJointIsland = beforeJump.max > maxLimit && afterJump.max > maxLimit && bridgeJump.max < maxLimit * 0.95;
+  return shortBadIsland || shortBadJointIsland;
 }
 
 function normalizedSkeletonSpread(landmarks) {
