@@ -11,6 +11,7 @@ import { createRoot } from "react-dom/client";
 import { Camera, FileVideo, Pause, Play, RotateCcw, ScanLine, Sparkles, Wand2, Waves } from "lucide-react";
 import { DrawingUtils, FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
 import { compareSkeletons_2026_07_06 } from "./skeletonComparison20260706.mjs";
+import { compareSkeletons_2026_07_12 } from "./skeletonComparison20260712.mjs";
 import "./styles.css";
 
 const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
@@ -70,11 +71,19 @@ const comparisonModels = {
     description:
       "Сравнение скелетов с нормализацией комплекции и мягкой синхронизацией под музыку."
   },
+  "2026-07-12": {
+    id: "2026-07-12",
+    name: "12.07.2026",
+    title: "12.07.2026",
+    shortTitle: "5. 12.07.2026",
+    description:
+      "Эластичное сравнение танца: нормализует тело и сравнивает последовательность поз через DTW, траектории и амплитуду движения."
+  },
   "all-auto": {
     id: "all-auto",
     name: "Все модели + автосканирование",
     title: "Все модели + автосканирование",
-    shortTitle: "5. Все модели",
+    shortTitle: "6. Все модели",
     description:
       "Лабораторный режим: одной кнопкой сканирует оба видео, затем прогоняет все доступные модели и сохраняет результаты в историю."
   }
@@ -365,6 +374,7 @@ function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio) {
   if (model === "overlay") return compareOverlayScans(leftScan, rightScan, sync, regions);
   if (model === "poses") return compareImpulsePoseScans(leftScan, rightScan, sync, regions, leftAudio);
   if (model === "2026-07-06") return compareScans20260706(leftScan, rightScan, sync);
+  if (model === "2026-07-12") return compareScans20260712(leftScan, rightScan, sync);
   return compareScans(leftScan, rightScan, sync, regions);
 }
 
@@ -384,6 +394,18 @@ function compareScans20260706(leftScan, rightScan, sync) {
     compareBoneDirections: true,
     compareVelocity: true
   });
+}
+
+function compareScans20260712(leftScan, rightScan, sync) {
+  const offsetMs = sync?.ready ? sync.offsetSeconds * 1000 : 0;
+  const userScan = {
+    ...(rightScan || {}),
+    frames: (rightScan?.frames || []).map((frame) => ({
+      ...frame,
+      timestamp: Math.round(frame.time * 1000 - offsetMs)
+    }))
+  };
+  return compareSkeletons_2026_07_12(leftScan, userScan);
 }
 
 function compareOverlayFrames(left, right, regions = defaultMediaPipeSettings.regions) {
@@ -2262,6 +2284,12 @@ function App() {
     if (comparisonModel === "overlay") return compareOverlayFrames(leftPose, rightPose, mediaPipeSettings.regions);
     if (comparisonModel === "2026-07-06") {
       return compareSkeletons_2026_07_06(
+        leftPose ? { frames: [{ ...leftPose, timestamp: Math.round((leftPose.time || 0) * 1000) }] } : null,
+        rightPose ? { frames: [{ ...rightPose, timestamp: Math.round((rightPose.time || 0) * 1000) }] } : null
+      );
+    }
+    if (comparisonModel === "2026-07-12") {
+      return compareSkeletons_2026_07_12(
         leftPose ? { frames: [{ ...leftPose, timestamp: Math.round((leftPose.time || 0) * 1000) }] } : null,
         rightPose ? { frames: [{ ...rightPose, timestamp: Math.round((rightPose.time || 0) * 1000) }] } : null
       );
