@@ -2439,6 +2439,144 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
   );
 }
 
+function AngleComparisonViewer({ leftScan, rightScan, sync, comparison, regions, enabled }) {
+  const canvasRef = useRef(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const pairs = useMemo(() => {
+    if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
+    const allPairs = synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
+    const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
+    return allPairs.filter((_, index) => index % stride === 0);
+  }, [enabled, leftScan, rightScan, sync]);
+  const pair = pairs[currentIndex] || null;
+
+  useEffect(() => {
+    setCurrentIndex(0);
+    setIsPlaying(false);
+  }, [pairs.length]);
+
+  useEffect(() => {
+    if (!enabled || !isPlaying || pairs.length < 2) return undefined;
+    const timer = window.setInterval(() => {
+      setCurrentIndex((index) => (index + 1) % pairs.length);
+    }, 180);
+    return () => window.clearInterval(timer);
+  }, [enabled, isPlaying, pairs.length]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = "#101827";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    drawSkeletonGrid(ctx, rect.width, rect.height);
+
+    if (pair) {
+      const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
+      const right = fitNormalizedSkeletonToReference(left, normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect));
+      drawSkeletonDifferences(ctx, left, right, rect.width, rect.height, regions);
+      drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
+      drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
+      drawAngleHotspots(ctx, left, right, comparison?.rows || [], rect.width, rect.height, regions);
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 13px Inter, sans-serif";
+      ctx.fillText(`Углы: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
+    } else {
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 15px Inter, sans-serif";
+      ctx.fillText("Запустите полный анализ модели «Углы», чтобы увидеть сравнение.", 14, 28);
+    }
+  }, [comparison?.rows, leftScan?.video?.aspect, pair, regions, rightScan?.video?.aspect]);
+
+  const frameScore = pair
+    ? comparePoseFrames(pair.leftFrame, pair.rightFrame, regions, {
+        leftAspect: leftScan?.video?.aspect,
+        rightAspect: rightScan?.video?.aspect
+      }).score
+    : null;
+  const angleRows = (comparison?.rows || []).slice(0, 6);
+
+  return (
+    <section className={`skeleton-lab angle-lab ${enabled ? "" : "hidden"}`}>
+      <div className="sync-header">
+        <div>
+          <p className="eyebrow">Angle Lab</p>
+          <h2>Визуализация модели «Углы»</h2>
+        </div>
+        <div className="legend">
+          <span>
+            <i className="skeleton-left" /> эталон
+          </span>
+          <span>
+            <i className="skeleton-right" /> правое видео
+          </span>
+          <span>
+            <i className="difference-color" /> угловое расхождение
+          </span>
+        </div>
+      </div>
+      <canvas ref={canvasRef} className="skeleton-canvas" />
+      <div className="overlay-controls">
+        <button type="button" onClick={() => setIsPlaying((value) => !value)} disabled={!pairs.length}>
+          {isPlaying ? <Pause size={17} /> : <Play size={17} />}
+          {isPlaying ? "Пауза" : "Play"}
+        </button>
+        <button type="button" onClick={() => setCurrentIndex((index) => Math.max(0, index - 1))} disabled={!pairs.length}>
+          Назад
+        </button>
+        <input
+          type="range"
+          min="0"
+          max={Math.max(0, pairs.length - 1)}
+          step="1"
+          value={Math.min(currentIndex, Math.max(0, pairs.length - 1))}
+          onChange={(event) => {
+            setIsPlaying(false);
+            setCurrentIndex(Number(event.target.value));
+          }}
+          disabled={!pairs.length}
+        />
+        <button
+          type="button"
+          onClick={() => setCurrentIndex((index) => Math.min(Math.max(0, pairs.length - 1), index + 1))}
+          disabled={!pairs.length}
+        >
+          Вперед
+        </button>
+      </div>
+      <div className="overlay-meta">
+        <span>
+          Кадр {pairs.length ? currentIndex + 1 : 0}/{pairs.length}
+        </span>
+        <span>Эталон: {pair ? formatSeconds(pair.leftTime, 2) : "-"}</span>
+        <span>Правое: {pair ? formatSeconds(pair.rightTime, 2) : "-"}</span>
+        <span>Углы кадра: {frameScore != null ? `${frameScore}%` : "-"}</span>
+        <span>Итог модели: {comparison?.ready ? `${comparison.score}%` : "-"}</span>
+      </div>
+      {angleRows.length > 0 && (
+        <div className="elastic-metrics">
+          {angleRows.map((row) => (
+            <span key={row.id}>
+              {row.title}: <b>{row.diff}°</b>
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="sync-note">
+        Здесь правый скелет сначала точно подгоняется корпусом к эталону. Красные маркеры показывают суставы, где средняя разница углов
+        самая заметная.
+      </p>
+    </section>
+  );
+}
+
 function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, enabled }) {
   const canvasRef = useRef(null);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -2665,6 +2803,35 @@ function drawNormalizedSkeleton(ctx, landmarks, width, height, color, regions) {
     ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+function drawAngleHotspots(ctx, leftLandmarks, rightLandmarks, rows, width, height, regions) {
+  if (!leftLandmarks?.length || !rightLandmarks?.length || !rows?.length) return;
+  const specs = new Map(activeAngleSpecs(regions).map((spec) => [spec.id, spec]));
+  const centerX = width / 2;
+  const centerY = height * 0.52;
+  const scale = Math.min(width, height) * 0.22;
+  const project = (point) => ({ x: centerX + point.x * scale, y: centerY + point.y * scale });
+  const hotRows = [...rows].sort((a, b) => (b.diff || 0) - (a.diff || 0)).slice(0, 4);
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 107, 107, 0.9)";
+  ctx.fillStyle = "rgba(255, 107, 107, 0.22)";
+  ctx.lineWidth = 2;
+  for (const row of hotRows) {
+    const spec = specs.get(row.id);
+    if (!spec) continue;
+    const jointId = spec.points[1];
+    const left = leftLandmarks[jointId];
+    const right = rightLandmarks[jointId];
+    if (!left || !right) continue;
+    for (const point of [project(left), project(right)]) {
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
 }
 
 function drawSkeletonDifferences(ctx, leftLandmarks, rightLandmarks, width, height, regions) {
@@ -3206,6 +3373,15 @@ function App() {
       />
 
       <KeyPoseViewer comparison={comparison} enabled={comparisonModel === "poses"} regions={mediaPipeSettings.regions} />
+
+      <AngleComparisonViewer
+        leftScan={leftScan}
+        rightScan={rightScan}
+        sync={activeSync}
+        comparison={comparison}
+        regions={mediaPipeSettings.regions}
+        enabled={comparisonModel === "angles" && Boolean(runState.result?.ready)}
+      />
 
       <ElasticDanceViewer
         leftScan={leftScan}
