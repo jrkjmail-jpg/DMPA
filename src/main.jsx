@@ -648,14 +648,23 @@ function overlayLandmarkIds(regions = defaultMediaPipeSettings.regions) {
   return Array.from(ids);
 }
 
-function normalizeSkeleton(landmarks) {
-  const center = averagePoint([landmarks[11], landmarks[12], landmarks[23], landmarks[24]].filter(Boolean));
+function normalizeSkeleton(landmarks, aspect = 1) {
+  const safeAspect = Number.isFinite(aspect) && aspect > 0 ? aspect : 1;
+  const corrected = (landmarks || []).map((point) =>
+    point
+      ? {
+          ...point,
+          x: point.x * safeAspect
+        }
+      : point
+  );
+  const center = averagePoint([corrected[11], corrected[12], corrected[23], corrected[24]].filter(Boolean));
   if (!center) return null;
-  const scalePoints = [landmarks[11], landmarks[12], landmarks[23], landmarks[24], landmarks[25], landmarks[26]].filter(Boolean);
+  const scalePoints = [corrected[11], corrected[12], corrected[23], corrected[24], corrected[25], corrected[26]].filter(Boolean);
   const scale =
     scalePoints.reduce((sum, point) => sum + Math.hypot(point.x - center.x, point.y - center.y), 0) / Math.max(1, scalePoints.length) ||
     0.1;
-  return landmarks.map((point) =>
+  return corrected.map((point) =>
     point
       ? {
           ...point,
@@ -931,6 +940,11 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
 
   return {
     duration,
+    video: {
+      width: video.videoWidth || 0,
+      height: video.videoHeight || 0,
+      aspect: video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 1
+    },
     range: { start: scanStart, end: scanEnd },
     settings: {
       modelVariant: settings.modelVariant,
@@ -960,12 +974,12 @@ async function analyzeAudioFile(file) {
   const audioContext = new AudioContextClass();
   const arrayBuffer = await file.arrayBuffer();
   const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-  const channel = audioBuffer.getChannelData(0);
+  const channel = mixAudioChannels(audioBuffer);
   const sampleRate = audioBuffer.sampleRate;
   const waveform = buildRmsSeries(channel, 900);
-  const hopSeconds = 0.05;
+  const hopSeconds = 0.025;
   const hopSize = Math.max(1, Math.floor(sampleRate * hopSeconds));
-  const windowSize = Math.max(hopSize, Math.floor(sampleRate * 0.08));
+  const windowSize = Math.max(hopSize, Math.floor(sampleRate * 0.12));
   const envelope = [];
   const flux = [];
   let previousEnergy = 0;
@@ -980,18 +994,35 @@ async function analyzeAudioFile(file) {
   normalizeInPlace(waveform);
   normalizeInPlace(envelope);
   normalizeInPlace(flux);
-  const syncFeatures = buildSyncFeatures(envelope, flux);
+  const smoothEnvelope = normalizeSeries(smoothSeries(envelope, 13));
+  const contrast = normalizeSeries(envelope.map((value, index) => Math.max(0, value - (smoothEnvelope[index] || 0) * 0.72)));
+  const clippedFlux = normalizeSeries(clipOutliers(flux, 0.88));
+  const syncFeatures = buildSyncFeatures(envelope, clippedFlux, smoothEnvelope, contrast);
   await audioContext.close();
 
   return {
     duration: audioBuffer.duration,
     waveform,
     envelope,
-    flux,
+    flux: clippedFlux,
+    smoothEnvelope,
+    contrast,
     syncFeatures,
     hopSeconds,
     peaks: detectPeaks(syncFeatures, hopSeconds)
   };
+}
+
+function mixAudioChannels(audioBuffer) {
+  const length = audioBuffer.length;
+  const channels = Math.min(2, audioBuffer.numberOfChannels || 1);
+  if (channels === 1) return audioBuffer.getChannelData(0);
+  const mixed = new Float32Array(length);
+  for (let channelIndex = 0; channelIndex < channels; channelIndex += 1) {
+    const channel = audioBuffer.getChannelData(channelIndex);
+    for (let i = 0; i < length; i += 1) mixed[i] += channel[i] / channels;
+  }
+  return mixed;
 }
 
 function buildRmsSeries(channel, bins) {
@@ -1019,6 +1050,32 @@ function normalizeInPlace(values) {
   for (let i = 0; i < values.length; i += 1) values[i] = values[i] / max;
 }
 
+function normalizeSeries(values) {
+  const copy = [...values];
+  normalizeInPlace(copy);
+  return copy;
+}
+
+function smoothSeries(values, radius = 5) {
+  return values.map((_, index) => {
+    let sum = 0;
+    let count = 0;
+    for (let offset = -radius; offset <= radius; offset += 1) {
+      const value = values[index + offset];
+      if (!Number.isFinite(value)) continue;
+      sum += value;
+      count += 1;
+    }
+    return count ? sum / count : 0;
+  });
+}
+
+function clipOutliers(values, percentile = 0.9) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  const limit = sorted.length ? sorted[Math.floor((sorted.length - 1) * percentile)] || 0.000001 : 0.000001;
+  return values.map((value) => Math.min(value || 0, limit));
+}
+
 function detectPeaks(envelope, hopSeconds) {
   const peaks = [];
   for (let i = 2; i < envelope.length - 2; i += 1) {
@@ -1039,6 +1096,8 @@ function estimateAudioSync(leftAudio, rightAudio) {
   const maxLag = Math.min(Math.round(35 / hop), Math.floor(Math.min(leftAudio.envelope.length, rightAudio.envelope.length) * 0.6));
   const left = zNormalize(leftAudio.syncFeatures || leftAudio.envelope);
   const right = zNormalize(rightAudio.syncFeatures || rightAudio.envelope);
+  const leftMusic = zNormalize(leftAudio.smoothEnvelope || leftAudio.envelope);
+  const rightMusic = zNormalize(rightAudio.smoothEnvelope || rightAudio.envelope);
   const leftFlux = zNormalize(leftAudio.flux || leftAudio.envelope);
   const rightFlux = zNormalize(rightAudio.flux || rightAudio.envelope);
   let bestLag = 0;
@@ -1047,18 +1106,20 @@ function estimateAudioSync(leftAudio, rightAudio) {
 
   for (let lag = -maxLag; lag <= maxLag; lag += 1) {
     let featureSum = 0;
+    let musicSum = 0;
     let fluxSum = 0;
     let count = 0;
     for (let i = 0; i < left.length; i += 1) {
       const j = i + lag;
       if (j < 0 || j >= right.length) continue;
       featureSum += left[i] * right[j];
+      musicSum += (leftMusic[i] || 0) * (rightMusic[j] || 0);
       fluxSum += (leftFlux[i] || 0) * (rightFlux[j] || 0);
       count += 1;
     }
     if (count < 20) continue;
-    const overlapPenalty = Math.min(1, count / Math.min(left.length, right.length));
-    const score = ((featureSum / count) * 0.72 + (fluxSum / count) * 0.28) * overlapPenalty;
+    const overlapPenalty = Math.min(1, count / Math.min(left.length, right.length)) ** 1.35;
+    const score = ((musicSum / count) * 0.62 + (featureSum / count) * 0.28 + (fluxSum / count) * 0.1) * overlapPenalty;
     if (score > bestScore) {
       secondBestScore = bestScore;
       bestScore = score;
@@ -1083,12 +1144,12 @@ function estimateAudioSync(leftAudio, rightAudio) {
   };
 }
 
-function buildSyncFeatures(envelope, flux) {
+function buildSyncFeatures(envelope, flux, smoothEnvelope = envelope, contrast = envelope) {
   return envelope.map((value, index) => {
     const previous = envelope[index - 1] ?? value;
     const next = envelope[index + 1] ?? value;
     const localContrast = Math.max(0, value - (previous + next) / 2);
-    return value * 0.45 + (flux[index] || 0) * 0.4 + localContrast * 0.15;
+    return (smoothEnvelope[index] || value) * 0.56 + value * 0.22 + (contrast[index] || localContrast) * 0.14 + (flux[index] || 0) * 0.08;
   });
 }
 
@@ -2066,8 +2127,8 @@ function WaveformTimeline({ leftAudio, rightAudio, sync, manualSync, onManualSyn
     ctx.fillStyle = "#f6f9fd";
     ctx.fillRect(0, 0, rect.width, rect.height);
     drawGrid(ctx, rect.width, rect.height);
-    drawWave(ctx, leftAudio?.waveform, rect.width, rect.height, "#df4a5f", 0);
-    drawWave(ctx, rightAudio?.waveform, rect.width, rect.height, "#407ee8", sync?.ready ? sync.offsetSeconds : 0);
+    drawWave(ctx, leftAudio?.waveform, rect.width, rect.height, "#df4a5f", 0, leftAudio?.duration);
+    drawWave(ctx, rightAudio?.waveform, rect.width, rect.height, "#407ee8", sync?.ready ? sync.offsetSeconds : 0, rightAudio?.duration);
     if (sync?.ready) {
       const x = rect.width / 2;
       ctx.strokeStyle = "#17202a";
@@ -2176,11 +2237,11 @@ function drawGrid(ctx, width, height) {
   ctx.stroke();
 }
 
-function drawWave(ctx, waveform, width, height, color, offsetSeconds) {
+function drawWave(ctx, waveform, width, height, color, offsetSeconds, duration = 0) {
   if (!waveform?.length) return;
   const center = height / 2;
   const scale = height * 0.36;
-  const offsetPx = offsetSeconds * 14;
+  const offsetPx = duration ? (offsetSeconds / duration) * width : offsetSeconds * 14;
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -2244,8 +2305,8 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
     drawSkeletonGrid(ctx, rect.width, rect.height);
 
     if (pair) {
-      const left = normalizeSkeleton(pair.leftFrame.landmarks);
-      const right = normalizeSkeleton(pair.rightFrame.landmarks);
+      const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
+      const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
       drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
       drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
       ctx.fillStyle = "#d8e8fa";
@@ -2256,7 +2317,7 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
       ctx.font = "700 15px Inter, sans-serif";
       ctx.fillText("Сначала отсканируйте оба скелета", 14, 28);
     }
-  }, [pair, regions]);
+  }, [leftScan?.video?.aspect, pair, regions, rightScan?.video?.aspect]);
 
   const frameScore = pair ? compareOverlayFrames(pair.leftFrame, pair.rightFrame, regions).score : null;
 
@@ -2361,8 +2422,8 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
     drawSkeletonGrid(ctx, rect.width, rect.height);
 
     if (pair) {
-      const left = normalizeSkeleton(pair.leftFrame.landmarks);
-      const right = normalizeSkeleton(pair.rightFrame.landmarks);
+      const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
+      const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
       drawSkeletonDifferences(ctx, left, right, rect.width, rect.height, regions);
       drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
       drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
@@ -2374,7 +2435,7 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
       ctx.font = "700 15px Inter, sans-serif";
       ctx.fillText("Отсканируйте оба видео и запустите анализ модели 12.07.2026", 14, 28);
     }
-  }, [pair, regions]);
+  }, [leftScan?.video?.aspect, pair, regions, rightScan?.video?.aspect]);
 
   const frameScore = pair ? compareOverlayFrames(pair.leftFrame, pair.rightFrame, regions).score : null;
   const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").includes("2026-07-12")).slice(0, 4);
