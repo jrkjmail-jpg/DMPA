@@ -2237,7 +2237,7 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
             ?
           </span>
         </label>
-        <span>
+        <span className="region-summary">
           MediaPipe возвращает 33 точки. В сравнении сейчас активно {specs.length} углов, в датасет сохраняется{" "}
           {settings.landmarkSet === "full33" ? "33 точки" : "13 ключевых точек"}.
         </span>

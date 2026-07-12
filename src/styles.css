@@ -397,11 +397,19 @@ h3 {
   margin: 0;
 }
 
-.region-settings span {
+.region-settings .region-summary {
   color: #52677c;
   flex-basis: 100%;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.region-settings .help-dot {
+  flex-basis: auto;
+  font-size: 11px;
+  height: 18px;
+  line-height: 1;
+  width: 18px;
 }
 
 .global-error,
