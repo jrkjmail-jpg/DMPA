@@ -26,6 +26,22 @@ test("brief MediaPipe tracking explosion is skipped instead of penalizing the da
   assert.ok(result.diagnostics.userOutliersSkipped >= 1, `expected skipped user outlier, got ${result.diagnostics.userOutliersSkipped}`);
 });
 
+test("small arm delay still counts as a successful hit", () => {
+  const reference = makeDanceSequence();
+  const delayed = delayArms(makeDanceSequence(), 2);
+  const result = compareSkeletons_2026_07_12(reference, delayed);
+  assert.ok(result.bodyParts.arms >= 88, `expected arms >= 88, got ${result.bodyParts.arms}`);
+  assert.ok(result.finalScore >= 82, `expected final score >= 82, got ${result.finalScore}`);
+});
+
+test("single limb impossible-speed spike is skipped", () => {
+  const reference = makeDanceSequence();
+  const user = corruptSingleLimbFrame(makeDanceSequence(), 20);
+  const result = compareSkeletons_2026_07_12(reference, user);
+  assert.ok(result.finalScore >= 92, `expected final score >= 92, got ${result.finalScore}`);
+  assert.ok(result.diagnostics.userOutliersSkipped >= 1, `expected skipped user outlier, got ${result.diagnostics.userOutliersSkipped}`);
+});
+
 test("identical choreography scores near 100", () => {
   const reference = makeDanceSequence();
   const result = compareSkeletons_2026_07_12(reference, reference);
@@ -87,6 +103,41 @@ function corruptFrame(sequence, frameIndex) {
                 x: point.x + (pointIndex % 2 ? 8 : -7),
                 y: point.y + (pointIndex % 3 ? -6 : 9),
                 visibility: 0.05
+              }
+            : point
+        )
+      };
+    })
+  };
+}
+
+function delayArms(sequence, frameDelay) {
+  const armIds = new Set([13, 14, 15, 16]);
+  return {
+    frames: sequence.frames.map((frame, index) => ({
+      ...frame,
+      landmarks: frame.landmarks.map((point, pointIndex) => {
+        if (!point || !armIds.has(pointIndex)) return point;
+        const source = sequence.frames[Math.max(0, index - frameDelay)].landmarks[pointIndex];
+        return { ...source };
+      })
+    }))
+  };
+}
+
+function corruptSingleLimbFrame(sequence, frameIndex) {
+  return {
+    frames: sequence.frames.map((frame, index) => {
+      if (index !== frameIndex) return frame;
+      return {
+        ...frame,
+        landmarks: frame.landmarks.map((point, pointIndex) =>
+          pointIndex === 15 || pointIndex === 16
+            ? {
+                ...point,
+                x: point.x + (pointIndex === 15 ? -7 : 7),
+                y: point.y - 6,
+                visibility: 0.95
               }
             : point
         )

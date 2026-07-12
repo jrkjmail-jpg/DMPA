@@ -3197,7 +3197,7 @@ function App() {
         sync={activeSync}
         comparison={comparison}
         regions={mediaPipeSettings.regions}
-        enabled={comparisonModel === "2026-07-12"}
+        enabled={comparisonModel === "2026-07-12" && Boolean(runState.result?.ready)}
       />
 
       <section className="analysis-panel">

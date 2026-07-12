@@ -18,6 +18,7 @@ const joints = Object.keys(aliases);
 const compareJoints = ["head", "leftShoulder", "rightShoulder", "leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftHip", "rightHip", "leftKnee", "rightKnee", "leftAnkle", "rightAnkle"];
 const motionJoints = ["leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftKnee", "rightKnee", "leftAnkle", "rightAnkle"];
 const torsoFitJoints = ["leftShoulder", "rightShoulder", "leftHip", "rightHip", "pelvis", "neck"];
+const limbTemporalGraceFrames = { arms: 2, legs: 1, torso: 0, head: 0 };
 const bones = [
   ["leftShoulder", "leftElbow", "arms"],
   ["leftElbow", "leftWrist", "arms"],
@@ -79,6 +80,7 @@ export function compareSkeletons_2026_07_12(referenceSkeleton, userSkeleton, opt
       trackingOutliersSkipped: referencePrepared.skippedFrames + userPrepared.skippedFrames,
       referenceOutliersSkipped: referencePrepared.skippedFrames,
       userOutliersSkipped: userPrepared.skippedFrames,
+      limbTemporalGraceFrames,
       weakPoints,
       missingJoints: [],
       confidence: confidenceFor(referenceFrames, userFrames)
@@ -196,20 +198,31 @@ function filterTrackingOutliers(frames) {
       .map((frame, index) => normalizedFrameJump(frames[index].landmarks, frame.landmarks, medianScale))
       .filter(Number.isFinite)
   );
+  const medianMaxStep = median(
+    frames
+      .slice(1)
+      .map((frame, index) => normalizedMaxFrameJump(frames[index].landmarks, frame.landmarks, medianScale))
+      .filter(Number.isFinite)
+  );
   const kept = frames.filter((frame, index) => {
     const scaleRatio = frame.bodyScale / Math.max(medianScale, 0.000001);
     const spreadRatio = frame.spread / Math.max(medianSpread, 0.000001);
     const previousJump = index > 0 ? normalizedFrameJump(frames[index - 1].landmarks, frame.landmarks, medianScale) : 0;
     const nextJump = index < frames.length - 1 ? normalizedFrameJump(frame.landmarks, frames[index + 1].landmarks, medianScale) : 0;
+    const previousMaxJump = index > 0 ? normalizedMaxFrameJump(frames[index - 1].landmarks, frame.landmarks, medianScale) : 0;
+    const nextMaxJump = index < frames.length - 1 ? normalizedMaxFrameJump(frame.landmarks, frames[index + 1].landmarks, medianScale) : 0;
     const jumpLimit = Math.max(1.1, medianStep * 5.5);
+    const maxJumpLimit = Math.max(2.2, medianMaxStep * 6.5);
     const isolatedJump = previousJump > jumpLimit && nextJump > jumpLimit;
+    const impossibleJointJump = previousMaxJump > maxJumpLimit && nextMaxJump > maxJumpLimit;
     return (
       frame.visibility >= 0.28 &&
       scaleRatio >= 0.42 &&
       scaleRatio <= 2.35 &&
       spreadRatio >= 0.35 &&
       spreadRatio <= 2.75 &&
-      !isolatedJump
+      !isolatedJump &&
+      !impossibleJointJump
     );
   });
   if (kept.length < Math.max(4, frames.length * 0.35)) return { frames, skippedFrames: 0 };
@@ -232,6 +245,13 @@ function normalizedFrameJump(previous, current, scale) {
     .map((joint) => distance(previous[joint], current[joint]) / Math.max(scale, 0.000001))
     .filter(Number.isFinite);
   return jumps.length ? average(jumps) : 0;
+}
+
+function normalizedMaxFrameJump(previous, current, scale) {
+  const jumps = compareJoints
+    .map((joint) => distance(previous[joint], current[joint]) / Math.max(scale, 0.000001))
+    .filter(Number.isFinite);
+  return jumps.length ? Math.max(...jumps) : 0;
 }
 
 function fitTorsoToReference(referencePoints, userPoints) {
@@ -298,7 +318,10 @@ function dtwAlign(referenceFrames, userFrames) {
     const from = Math.max(1, center - band);
     const to = Math.min(m, center + band);
     for (let j = from; j <= to; j += 1) {
-      const cost = frameCost(referenceFrames[i - 1], userFrames[j - 1]);
+      const cost = frameCost(referenceFrames[i - 1], userFrames[j - 1], {
+        userFrames,
+        userIndex: j - 1
+      });
       const choices = [
         [dp[i - 1][j], i - 1, j],
         [dp[i][j - 1], i, j - 1],
@@ -331,30 +354,84 @@ function dtwAlign(referenceFrames, userFrames) {
   };
 }
 
-function frameCost(a, b) {
+function frameCost(a, b, context = null) {
   const rightNormalized = fitTorsoToReference(a.normalized, b.normalized);
   const rightAngles = anglesFor(rightNormalized);
   const rightBones = bonesFor(rightNormalized);
   const pointCost = average(
     compareJoints.map((joint) => {
       const left = a.normalized[joint];
-      const right = rightNormalized[joint];
+      const right = bestFittedJoint(a, rightNormalized, context, joint);
       return left && right ? Math.min(1.4, distance(left, right)) : 0.7;
     })
   );
   const angleCost = average(
-    Object.keys(a.angles).map((key) =>
-      Number.isFinite(a.angles[key]) && Number.isFinite(rightAngles[key]) ? Math.min(1, Math.abs(a.angles[key] - rightAngles[key]) / 135) : 0.5
-    )
+    angleSpecs.map(([key, p1, p2, p3, part]) => {
+      const leftAngle = a.angles[key];
+      const rightAngle = bestFittedAngle(a, context, key, [p1, p2, p3], part, rightAngles[key]);
+      return Number.isFinite(leftAngle) && Number.isFinite(rightAngle) ? Math.min(1, Math.abs(leftAngle - rightAngle) / 135) : 0.5;
+    })
   );
   const boneCost = average(
-    Object.keys(a.bones).map((key) => {
+    bones.map(([from, to, part]) => {
+      const key = `${from}-${to}`;
       const left = a.bones[key];
-      const right = rightBones[key];
+      const right = bestFittedBone(a, context, key, from, to, part, rightBones[key]);
       return left && right ? (1 - dot(left, right)) / 2 : 0.5;
     })
   );
   return pointCost * 0.45 + angleCost * 0.35 + boneCost * 0.2;
+}
+
+function bestFittedJoint(referenceFrame, fallbackFitted, context, joint) {
+  const part = partForJoint(joint);
+  const candidates = fittedCandidates(referenceFrame, context, part);
+  if (!candidates.length) return fallbackFitted[joint];
+  const reference = referenceFrame.normalized[joint];
+  if (!reference) return fallbackFitted[joint];
+  return minBy(candidates, (candidate) => distance(reference, candidate[joint]))?.[joint] || fallbackFitted[joint];
+}
+
+function bestFittedAngle(referenceFrame, context, key, points, part, fallbackAngle) {
+  const candidates = fittedCandidates(referenceFrame, context, part);
+  if (!candidates.length) return fallbackAngle;
+  const leftAngle = referenceFrame.angles[key];
+  if (!Number.isFinite(leftAngle)) return fallbackAngle;
+  const best = minBy(candidates, (candidate) => {
+    const value = angle(candidate[points[0]], candidate[points[1]], candidate[points[2]]);
+    return Number.isFinite(value) ? Math.abs(leftAngle - value) : Infinity;
+  });
+  return best ? angle(best[points[0]], best[points[1]], best[points[2]]) : fallbackAngle;
+}
+
+function bestFittedBone(referenceFrame, context, key, from, to, part, fallbackBone) {
+  const candidates = fittedCandidates(referenceFrame, context, part);
+  if (!candidates.length) return fallbackBone;
+  const leftBone = referenceFrame.bones[key];
+  if (!leftBone) return fallbackBone;
+  const best = minBy(candidates, (candidate) => {
+    const rightBone = candidate[from] && candidate[to] ? normalize(vector(candidate[from], candidate[to])) : null;
+    return rightBone ? (1 - dot(leftBone, rightBone)) / 2 : Infinity;
+  });
+  return best?.[from] && best?.[to] ? normalize(vector(best[from], best[to])) : fallbackBone;
+}
+
+function fittedCandidates(referenceFrame, context, part) {
+  const window = limbTemporalGraceFrames[part] || 0;
+  if (!context?.userFrames?.length || !Number.isFinite(context.userIndex) || window <= 0) return [];
+  const candidates = [];
+  for (let offset = -window; offset <= window; offset += 1) {
+    const frame = context.userFrames[context.userIndex + offset];
+    if (frame?.normalized) candidates.push(fitTorsoToReference(referenceFrame.normalized, frame.normalized));
+  }
+  return candidates;
+}
+
+function partForJoint(joint) {
+  if (["leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftShoulder", "rightShoulder"].includes(joint)) return "arms";
+  if (["leftKnee", "rightKnee", "leftAnkle", "rightAnkle"].includes(joint)) return "legs";
+  if (joint === "head") return "head";
+  return "torso";
 }
 
 function trajectoryScoreFor(path, referenceFrames, userFrames) {
@@ -426,14 +503,25 @@ function bodyPartScores(path, referenceFrames, userFrames) {
     const left = referenceFrames[i];
     const right = userFrames[j];
     const fittedRight = fitTorsoToReference(left.normalized, right.normalized);
-    const fittedBones = bonesFor(fittedRight);
     for (const [a, b, part] of bones) {
       const key = `${a}-${b}`;
+      const partFitted = bestFittedFrameForPart(left, userFrames, j, part) || fittedRight;
+      const fittedBones = bonesFor(partFitted);
       if (left.bones[key] && fittedBones[key]) parts[part].push(((dot(left.bones[key], fittedBones[key]) + 1) / 2) * 100);
     }
-    if (left.normalized.head && fittedRight.head) parts.head.push(clampScore(100 - distance(left.normalized.head, fittedRight.head) * 120));
+    const headFitted = bestFittedFrameForPart(left, userFrames, j, "head") || fittedRight;
+    if (left.normalized.head && headFitted.head) parts.head.push(clampScore(100 - distance(left.normalized.head, headFitted.head) * 120));
   }
   return Object.fromEntries(Object.entries(parts).map(([part, values]) => [part, clampScore(average(values))]));
+}
+
+function bestFittedFrameForPart(referenceFrame, userFrames, userIndex, part) {
+  const candidates = fittedCandidates(referenceFrame, { userFrames, userIndex }, part);
+  if (!candidates.length) return null;
+  const partJoints = compareJoints.filter((joint) => partForJoint(joint) === part);
+  return minBy(candidates, (candidate) =>
+    average(partJoints.map((joint) => distance(referenceFrame.normalized[joint], candidate[joint])).filter(Number.isFinite))
+  );
 }
 
 function rowsFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, bodyParts }) {
@@ -608,6 +696,19 @@ function average(values) {
 function median(values) {
   const clean = values.filter(Number.isFinite).sort((a, b) => a - b);
   return clean.length ? clean[Math.floor(clean.length / 2)] : 0;
+}
+
+function minBy(items, scoreForItem) {
+  let best = null;
+  let bestScore = Infinity;
+  for (const item of items) {
+    const score = scoreForItem(item);
+    if (score < bestScore) {
+      best = item;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 function averagePoint(points) {
