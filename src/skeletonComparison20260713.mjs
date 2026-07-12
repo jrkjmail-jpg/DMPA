@@ -81,7 +81,8 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
   const motionScore = clampScore(anglePatternScore * 0.35 + trajectoryScore * 0.22 + rangeScore * 0.25 + bodyParts.arms * 0.1 + bodyParts.legs * 0.08);
   const rawScore = clampScore(phraseScore * 0.56 + motionScore * 0.24 + bodyParts.torso * 0.08 + rhythmScore * 0.12);
   const stableExecutionScore = stableExecutionScoreFor({ bodyParts, rangeScore, rhythmScore, keyPoseScore, poseScore });
-  const finalScore = Math.min(Math.max(rawScore, stableExecutionScore), activityGate.ceiling, evidenceGate.ceiling);
+  const repeatScore = repeatChoreographyScoreFor({ bodyParts, rangeScore, rhythmScore, poseScore, keyPoseScore, frameHitScore, activityGate });
+  const finalScore = Math.min(Math.max(rawScore, stableExecutionScore, repeatScore), activityGate.ceiling, evidenceGate.ceiling);
   const weakPoints = weakPointsFor({
     poseScore,
     trajectoryScore,
@@ -112,6 +113,7 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
     anglePatternScore,
     phraseScore,
     stableExecutionScore,
+    repeatScore,
     bodyParts,
     diagnostics: {
       averageTimeOffsetMs: Math.round(average(alignment.path.map(([i, j]) => Math.abs(referenceFrames[i].timestampMs - userFrames[j].timestampMs)))),
@@ -138,6 +140,7 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
       anglePatternScore,
       phraseScore,
       stableExecutionScore,
+      repeatScore,
       trackingQualityGate
     }),
     suggestions: weakPoints,
@@ -688,7 +691,7 @@ function choreographyEvidenceGate({ trajectoryScore, rangeScore, keyPoseScore, f
     const strongChoreographyEvidence = rangeScore >= 80 && keyPoseScore >= 70 && frameHitScore >= 72;
     if (rangeScore < 80) ceiling = Math.min(ceiling, 80);
     else if (!strongChoreographyEvidence && anglePatternScore < 76) ceiling = Math.min(ceiling, 82);
-    else ceiling = Math.min(ceiling, 92);
+    else ceiling = Math.min(ceiling, 96);
     reason.push("траектория движения не подтверждает ту же хореографическую фразу");
   } else if (trajectoryScore < 62 && Math.min(keyPoseScore, frameHitScore, anglePatternScore) < 72) {
     ceiling = Math.min(ceiling, 74);
@@ -711,6 +714,32 @@ function stableExecutionScoreFor({ bodyParts, rangeScore, rhythmScore, keyPoseSc
       keyPoseScore * 0.07 +
       poseScore * 0.03
   );
+}
+
+function repeatChoreographyScoreFor({ bodyParts, rangeScore, rhythmScore, poseScore, keyPoseScore, frameHitScore, activityGate }) {
+  if (activityGate?.ceiling < 90) return activityGate.ceiling;
+  const limbFloor = Math.min(bodyParts.arms || 0, bodyParts.legs || 0);
+  const evidenceFloor = Math.min(limbFloor, rangeScore, rhythmScore, frameHitScore);
+  if (evidenceFloor < 76 || (bodyParts.torso || 0) < 92) {
+    return clampScore(
+      (bodyParts.arms || 0) * 0.24 +
+        (bodyParts.legs || 0) * 0.22 +
+        (bodyParts.torso || 0) * 0.12 +
+        rangeScore * 0.18 +
+        rhythmScore * 0.14 +
+        frameHitScore * 0.06 +
+        keyPoseScore * 0.04
+    );
+  }
+  const base =
+    (bodyParts.arms || 0) * 0.3 +
+    (bodyParts.legs || 0) * 0.25 +
+    (bodyParts.torso || 0) * 0.15 +
+    rangeScore * 0.15 +
+    rhythmScore * 0.1 +
+    poseScore * 0.05;
+  const corroborationBonus = Math.min(5, Math.max(0, evidenceFloor - 76) * 0.22 + Math.max(0, keyPoseScore - 70) * 0.12);
+  return clampScore(base + corroborationBonus);
 }
 
 function trackingQualityGateFor(referencePrepared, userPrepared) {
@@ -802,10 +831,12 @@ function rowsFor({
   anglePatternScore,
   phraseScore,
   stableExecutionScore,
+  repeatScore,
   trackingQualityGate
 }) {
   return [
     row("2026-07-13-phrase", "13.07.2026: хореографическая фраза", phraseScore),
+    row("2026-07-13-repeat", "13.07.2026: устойчивый повтор", repeatScore),
     row("2026-07-13-stable-execution", "13.07.2026: устойчивое исполнение", stableExecutionScore),
     row("2026-07-13-angle-pattern", "13.07.2026: рисунок углов", anglePatternScore),
     row("2026-07-13-key-poses", "13.07.2026: ключевые позы", keyPoseScore),

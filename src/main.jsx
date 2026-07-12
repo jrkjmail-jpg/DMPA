@@ -100,9 +100,9 @@ const comparisonModels = {
   },
   "2026-07-13": {
     id: "2026-07-13",
-    version: "4.0.0",
-    versionLabel: "v4.0.0",
-    algorithmBuild: "choreography-stable-execution-2026-07-13",
+    version: "4.1.0",
+    versionLabel: "v4.1.0",
+    algorithmBuild: "choreography-repeat-evidence-2026-07-13",
     name: "13.07.2026",
     title: "13.07.2026",
     shortTitle: "6. 13.07.2026",
