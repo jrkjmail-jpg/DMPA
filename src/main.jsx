@@ -675,6 +675,47 @@ function normalizeSkeleton(landmarks, aspect = 1) {
   );
 }
 
+function fitNormalizedSkeletonToReference(referenceLandmarks, userLandmarks) {
+  const fitIds = [11, 12, 23, 24];
+  const pairs = fitIds.map((id) => [referenceLandmarks?.[id], userLandmarks?.[id]]).filter(([reference, user]) => reference && user);
+  if (pairs.length < 2) return userLandmarks;
+  const referenceCenter = averagePoint(pairs.map(([reference]) => reference));
+  const userCenter = averagePoint(pairs.map(([, user]) => user));
+  let dotSum = 0;
+  let crossSum = 0;
+  let referenceEnergy = 0;
+  let userEnergy = 0;
+  for (const [reference, user] of pairs) {
+    const rx = reference.x - referenceCenter.x;
+    const ry = reference.y - referenceCenter.y;
+    const ux = user.x - userCenter.x;
+    const uy = user.y - userCenter.y;
+    dotSum += ux * rx + uy * ry;
+    crossSum += ux * ry - uy * rx;
+    referenceEnergy += rx * rx + ry * ry;
+    userEnergy += ux * ux + uy * uy;
+  }
+  const rotation = Math.atan2(crossSum, dotSum);
+  const scale = Math.sqrt(referenceEnergy / Math.max(userEnergy, 0.000001));
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  const fitted = userLandmarks.map((point) => {
+    if (!point) return point;
+    const x = point.x - userCenter.x;
+    const y = point.y - userCenter.y;
+    return {
+      ...point,
+      x: referenceCenter.x + (x * cos - y * sin) * scale,
+      y: referenceCenter.y + (x * sin + y * cos) * scale,
+      z: (point.z || 0) * scale
+    };
+  });
+  for (const id of fitIds) {
+    if (referenceLandmarks?.[id] && fitted?.[id]) fitted[id] = { ...fitted[id], ...referenceLandmarks[id] };
+  }
+  return fitted;
+}
+
 function regionForLandmark(id) {
   if ([13, 14, 15, 16, 11, 12].includes(id)) return "arms";
   if ([25, 26, 27, 28, 29, 30, 31, 32].includes(id)) return "legs";
@@ -2306,7 +2347,7 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
 
     if (pair) {
       const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
-      const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
+      const right = fitNormalizedSkeletonToReference(left, normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect));
       drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
       drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
       ctx.fillStyle = "#d8e8fa";
@@ -2423,7 +2464,7 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
 
     if (pair) {
       const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
-      const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
+      const right = fitNormalizedSkeletonToReference(left, normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect));
       drawSkeletonDifferences(ctx, left, right, rect.width, rect.height, regions);
       drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
       drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);

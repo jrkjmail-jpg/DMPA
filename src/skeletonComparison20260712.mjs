@@ -17,6 +17,7 @@ const aliases = {
 const joints = Object.keys(aliases);
 const compareJoints = ["head", "leftShoulder", "rightShoulder", "leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftHip", "rightHip", "leftKnee", "rightKnee", "leftAnkle", "rightAnkle"];
 const motionJoints = ["leftElbow", "rightElbow", "leftWrist", "rightWrist", "leftKnee", "rightKnee", "leftAnkle", "rightAnkle"];
+const torsoFitJoints = ["leftShoulder", "rightShoulder", "leftHip", "rightHip", "pelvis", "neck"];
 const bones = [
   ["leftShoulder", "leftElbow", "arms"],
   ["leftElbow", "leftWrist", "arms"],
@@ -169,6 +170,57 @@ function bodyScale(points) {
   return Math.max(0.0001, torso + thigh + shin || 1);
 }
 
+function fitTorsoToReference(referencePoints, userPoints) {
+  const pairs = torsoFitJoints
+    .map((joint) => [referencePoints[joint], userPoints[joint]])
+    .filter(([reference, user]) => reference && user);
+  if (pairs.length < 2) return userPoints;
+
+  const referenceCenter = averagePoint(pairs.map(([reference]) => reference));
+  const userCenter = averagePoint(pairs.map(([, user]) => user));
+  let dotSum = 0;
+  let crossSum = 0;
+  let referenceEnergy = 0;
+  let userEnergy = 0;
+
+  for (const [reference, user] of pairs) {
+    const rx = reference.x - referenceCenter.x;
+    const ry = reference.y - referenceCenter.y;
+    const ux = user.x - userCenter.x;
+    const uy = user.y - userCenter.y;
+    dotSum += ux * rx + uy * ry;
+    crossSum += ux * ry - uy * rx;
+    referenceEnergy += rx * rx + ry * ry;
+    userEnergy += ux * ux + uy * uy;
+  }
+
+  const rotation = Math.atan2(crossSum, dotSum);
+  const scale = Math.sqrt(referenceEnergy / Math.max(userEnergy, 0.000001));
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+
+  const fitted = Object.fromEntries(
+    Object.entries(userPoints).map(([joint, point]) => {
+      if (!point) return [joint, null];
+      const x = point.x - userCenter.x;
+      const y = point.y - userCenter.y;
+      return [
+        joint,
+        {
+          ...point,
+          x: referenceCenter.x + (x * cos - y * sin) * scale,
+          y: referenceCenter.y + (x * sin + y * cos) * scale,
+          z: (point.z || 0) * scale
+        }
+      ];
+    })
+  );
+  for (const joint of torsoFitJoints) {
+    if (referencePoints[joint] && fitted[joint]) fitted[joint] = { ...fitted[joint], ...referencePoints[joint] };
+  }
+  return fitted;
+}
+
 function dtwAlign(referenceFrames, userFrames) {
   const n = referenceFrames.length;
   const m = userFrames.length;
@@ -216,22 +268,25 @@ function dtwAlign(referenceFrames, userFrames) {
 }
 
 function frameCost(a, b) {
+  const rightNormalized = fitTorsoToReference(a.normalized, b.normalized);
+  const rightAngles = anglesFor(rightNormalized);
+  const rightBones = bonesFor(rightNormalized);
   const pointCost = average(
     compareJoints.map((joint) => {
       const left = a.normalized[joint];
-      const right = b.normalized[joint];
+      const right = rightNormalized[joint];
       return left && right ? Math.min(1.4, distance(left, right)) : 0.7;
     })
   );
   const angleCost = average(
     Object.keys(a.angles).map((key) =>
-      Number.isFinite(a.angles[key]) && Number.isFinite(b.angles[key]) ? Math.min(1, Math.abs(a.angles[key] - b.angles[key]) / 135) : 0.5
+      Number.isFinite(a.angles[key]) && Number.isFinite(rightAngles[key]) ? Math.min(1, Math.abs(a.angles[key] - rightAngles[key]) / 135) : 0.5
     )
   );
   const boneCost = average(
     Object.keys(a.bones).map((key) => {
       const left = a.bones[key];
-      const right = b.bones[key];
+      const right = rightBones[key];
       return left && right ? (1 - dot(left, right)) / 2 : 0.5;
     })
   );
@@ -243,9 +298,11 @@ function trajectoryScoreFor(path, referenceFrames, userFrames) {
   for (let index = 1; index < path.length; index += 1) {
     const [previousI, previousJ] = path[index - 1];
     const [i, j] = path[index];
+    const previousUser = fitTorsoToReference(referenceFrames[previousI].normalized, userFrames[previousJ].normalized);
+    const currentUser = fitTorsoToReference(referenceFrames[i].normalized, userFrames[j].normalized);
     for (const joint of motionJoints) {
       const leftDelta = delta(referenceFrames[previousI].normalized[joint], referenceFrames[i].normalized[joint]);
-      const rightDelta = delta(userFrames[previousJ].normalized[joint], userFrames[j].normalized[joint]);
+      const rightDelta = delta(previousUser[joint], currentUser[joint]);
       if (!leftDelta || length(leftDelta) < 0.01) continue;
       if (!rightDelta || length(rightDelta) < 0.005) {
         scores.push(0);
@@ -304,11 +361,13 @@ function bodyPartScores(path, referenceFrames, userFrames) {
   for (const [i, j] of path) {
     const left = referenceFrames[i];
     const right = userFrames[j];
+    const fittedRight = fitTorsoToReference(left.normalized, right.normalized);
+    const fittedBones = bonesFor(fittedRight);
     for (const [a, b, part] of bones) {
       const key = `${a}-${b}`;
-      if (left.bones[key] && right.bones[key]) parts[part].push(((dot(left.bones[key], right.bones[key]) + 1) / 2) * 100);
+      if (left.bones[key] && fittedBones[key]) parts[part].push(((dot(left.bones[key], fittedBones[key]) + 1) / 2) * 100);
     }
-    if (left.normalized.head && right.normalized.head) parts.head.push(clampScore(100 - distance(left.normalized.head, right.normalized.head) * 120));
+    if (left.normalized.head && fittedRight.head) parts.head.push(clampScore(100 - distance(left.normalized.head, fittedRight.head) * 120));
   }
   return Object.fromEntries(Object.entries(parts).map(([part, values]) => [part, clampScore(average(values))]));
 }
@@ -480,6 +539,17 @@ function range(values) {
 function average(values) {
   const clean = values.filter((value) => Number.isFinite(value));
   return clean.length ? clean.reduce((sum, value) => sum + value, 0) / clean.length : 0;
+}
+
+function averagePoint(points) {
+  const clean = points.filter(Boolean);
+  return clean.length
+    ? {
+        x: average(clean.map((point) => point.x)),
+        y: average(clean.map((point) => point.y)),
+        z: average(clean.map((point) => point.z || 0))
+      }
+    : null;
 }
 
 function clampScore(value) {

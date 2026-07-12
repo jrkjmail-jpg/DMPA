@@ -10,6 +10,14 @@ test("same choreography with body scale, camera offset, and phase shift scores h
   assert.ok(result.trajectoryScore >= 70, `expected trajectory >= 70, got ${result.trajectoryScore}`);
 });
 
+test("torso width mismatch is locked to reference before scoring limbs", () => {
+  const reference = makeDanceSequence();
+  const user = widenTorso(makeDanceSequence({ amplitude: 0.95 }), 1.65);
+  const result = compareSkeletons_2026_07_12(reference, user);
+  assert.ok(result.bodyParts.torso >= 98, `expected torso >= 98, got ${result.bodyParts.torso}`);
+  assert.ok(result.finalScore >= 78, `expected final score >= 78, got ${result.finalScore}`);
+});
+
 test("identical choreography scores near 100", () => {
   const reference = makeDanceSequence();
   const result = compareSkeletons_2026_07_12(reference, reference);
@@ -41,6 +49,20 @@ function makeDanceSequence(options = {}) {
     };
   });
   return { frames };
+}
+
+function widenTorso(sequence, factor) {
+  const torsoIds = new Set([11, 12, 23, 24]);
+  return {
+    frames: sequence.frames.map((frame) => {
+      const landmarks = frame.landmarks.map((point, index) => {
+        if (!point || !torsoIds.has(index)) return point;
+        const centerX = (frame.landmarks[23].x + frame.landmarks[24].x) / 2;
+        return { ...point, x: centerX + (point.x - centerX) * factor };
+      });
+      return { ...frame, landmarks };
+    })
+  };
 }
 
 function makePose(time, options = {}) {
