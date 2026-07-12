@@ -12,6 +12,7 @@ import { Camera, FileVideo, Pause, Play, RotateCcw, ScanLine, Sparkles, Wand2, W
 import { DrawingUtils, FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
 import { compareSkeletons_2026_07_06 } from "./skeletonComparison20260706.mjs";
 import { compareSkeletons_2026_07_12 } from "./skeletonComparison20260712.mjs";
+import { compareSkeletons_2026_07_13 } from "./skeletonComparison20260713.mjs";
 import "./styles.css";
 
 const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
@@ -79,11 +80,19 @@ const comparisonModels = {
     description:
       "Эластичное сравнение танца: нормализует тело и сравнивает последовательность поз через DTW, траектории и амплитуду движения."
   },
+  "2026-07-13": {
+    id: "2026-07-13",
+    name: "13.07.2026",
+    title: "13.07.2026",
+    shortTitle: "6. 13.07.2026",
+    description:
+      "Хореографическое сравнение: корпус как якорь, ключевые позы, мягкая задержка рук и робастная оценка двигательной фразы."
+  },
   "all-auto": {
     id: "all-auto",
     name: "Все модели + автосканирование",
     title: "Все модели + автосканирование",
-    shortTitle: "6. Все модели",
+    shortTitle: "7. Все модели",
     description:
       "Лабораторный режим: одной кнопкой сканирует оба видео, затем прогоняет все доступные модели и сохраняет результаты в историю."
   }
@@ -423,6 +432,7 @@ function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio) {
   if (model === "poses") return compareImpulsePoseScans(leftScan, rightScan, sync, regions, leftAudio);
   if (model === "2026-07-06") return compareScans20260706(leftScan, rightScan, sync);
   if (model === "2026-07-12") return compareScans20260712(leftScan, rightScan, sync);
+  if (model === "2026-07-13") return compareScans20260713(leftScan, rightScan, sync);
   return compareScans(leftScan, rightScan, sync, regions);
 }
 
@@ -454,6 +464,18 @@ function compareScans20260712(leftScan, rightScan, sync) {
     }))
   };
   return compareSkeletons_2026_07_12(leftScan, userScan);
+}
+
+function compareScans20260713(leftScan, rightScan, sync) {
+  const offsetMs = sync?.ready ? sync.offsetSeconds * 1000 : 0;
+  const userScan = {
+    ...(rightScan || {}),
+    frames: (rightScan?.frames || []).map((frame) => ({
+      ...frame,
+      timestamp: Math.round(frame.time * 1000 - offsetMs)
+    }))
+  };
+  return compareSkeletons_2026_07_13(leftScan, userScan);
 }
 
 function compareOverlayFrames(left, right, regions = defaultMediaPipeSettings.regions) {
@@ -2778,7 +2800,7 @@ function AngleComparisonViewer({ leftScan, rightScan, sync, comparison, regions,
   );
 }
 
-function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, enabled }) {
+function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, enabled, modelId = "2026-07-12" }) {
   const canvasRef = useRef(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -2825,23 +2847,23 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
       drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
       ctx.fillStyle = "#d8e8fa";
       ctx.font = "700 13px Inter, sans-serif";
-      ctx.fillText(`12.07.2026: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
+      ctx.fillText(`${comparisonModels[modelId]?.title || "Elastic"}: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
     } else {
       ctx.fillStyle = "#d8e8fa";
       ctx.font = "700 15px Inter, sans-serif";
-      ctx.fillText("Отсканируйте оба видео и запустите анализ модели 12.07.2026", 14, 28);
+      ctx.fillText(`Отсканируйте оба видео и запустите анализ модели ${comparisonModels[modelId]?.title || "Elastic"}`, 14, 28);
     }
-  }, [leftScan?.video?.aspect, pair, regions, rightScan?.video?.aspect]);
+  }, [leftScan?.video?.aspect, modelId, pair, regions, rightScan?.video?.aspect]);
 
   const frameScore = pair ? compareOverlayFrames(pair.leftFrame, pair.rightFrame, regions).score : null;
-  const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").includes("2026-07-12")).slice(0, 4);
+  const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").includes(modelId)).slice(0, 5);
 
   return (
     <section className={`skeleton-lab elastic-lab ${enabled ? "" : "hidden"}`}>
       <div className="sync-header">
         <div>
           <p className="eyebrow">Elastic Dance Lab</p>
-          <h2>Визуализация модели 12.07.2026</h2>
+          <h2>Визуализация модели {comparisonModels[modelId]?.title || "Elastic"}</h2>
         </div>
         <div className="legend">
           <span>
@@ -2897,7 +2919,7 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
         <div className="elastic-metrics">
           {modelRows.map((row) => (
             <span key={row.id}>
-              {row.title.replace("12.07.2026: ", "")}: <b>{row.score}%</b>
+              {row.title.replace(`${comparisonModels[modelId]?.title || modelId}: `, "")}: <b>{row.score}%</b>
             </span>
           ))}
         </div>
@@ -3099,6 +3121,12 @@ function App() {
     }
     if (comparisonModel === "2026-07-12") {
       return compareSkeletons_2026_07_12(
+        leftPose ? { frames: [{ ...leftPose, timestamp: Math.round((leftPose.time || 0) * 1000) }] } : null,
+        rightPose ? { frames: [{ ...rightPose, timestamp: Math.round((rightPose.time || 0) * 1000) }] } : null
+      );
+    }
+    if (comparisonModel === "2026-07-13") {
+      return compareSkeletons_2026_07_13(
         leftPose ? { frames: [{ ...leftPose, timestamp: Math.round((leftPose.time || 0) * 1000) }] } : null,
         rightPose ? { frames: [{ ...rightPose, timestamp: Math.round((rightPose.time || 0) * 1000) }] } : null
       );
@@ -3590,7 +3618,8 @@ function App() {
         sync={activeSync}
         comparison={comparison}
         regions={mediaPipeSettings.regions}
-        enabled={comparisonModel === "2026-07-12" && Boolean(runState.result?.ready)}
+        enabled={(comparisonModel === "2026-07-12" || comparisonModel === "2026-07-13") && Boolean(runState.result?.ready)}
+        modelId={comparisonModel === "2026-07-13" ? "2026-07-13" : "2026-07-12"}
       />
 
       <section className="analysis-panel">
