@@ -657,6 +657,46 @@ h3 {
   width: 100%;
 }
 
+.manual-sync-controls {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  margin-top: 12px;
+}
+
+.manual-sync-controls label {
+  align-content: start;
+  color: #506276;
+  display: grid;
+  font-size: 12px;
+  font-weight: 800;
+  gap: 6px;
+}
+
+.manual-sync-controls label:has(input[type="checkbox"]) {
+  align-items: center;
+  grid-template-columns: auto 1fr;
+  padding-top: 22px;
+}
+
+.manual-sync-controls input,
+.manual-sync-controls select {
+  background: #ffffff;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  color: #17202a;
+  font: inherit;
+  font-size: 14px;
+  min-height: 38px;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.manual-sync-controls input[type="checkbox"] {
+  min-height: auto;
+  width: auto;
+}
+
 .sync-note {
   color: #3f5062;
   line-height: 1.5;
@@ -968,7 +1008,8 @@ h3 {
   .lab-controls,
   .settings-grid,
   .model-tabs,
-  .pose-grid {
+  .pose-grid,
+  .manual-sync-controls {
     grid-template-columns: 1fr;
   }
 
@@ -1024,6 +1065,10 @@ h3 {
   .permission-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .manual-sync-controls label:has(input[type="checkbox"]) {
+    padding-top: 0;
   }
 
   .scan-button {

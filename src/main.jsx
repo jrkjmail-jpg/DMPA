@@ -933,21 +933,30 @@ async function analyzeAudioFile(file) {
   const hopSize = Math.max(1, Math.floor(sampleRate * hopSeconds));
   const windowSize = Math.max(hopSize, Math.floor(sampleRate * 0.08));
   const envelope = [];
+  const flux = [];
+  let previousEnergy = 0;
 
   for (let start = 0; start < channel.length - windowSize; start += hopSize) {
-    envelope.push(rms(channel, start, start + windowSize));
+    const energy = rms(channel, start, start + windowSize);
+    envelope.push(energy);
+    flux.push(Math.max(0, energy - previousEnergy));
+    previousEnergy = energy;
   }
 
   normalizeInPlace(waveform);
   normalizeInPlace(envelope);
+  normalizeInPlace(flux);
+  const syncFeatures = buildSyncFeatures(envelope, flux);
   await audioContext.close();
 
   return {
     duration: audioBuffer.duration,
     waveform,
     envelope,
+    flux,
+    syncFeatures,
     hopSeconds,
-    peaks: detectPeaks(envelope, hopSeconds)
+    peaks: detectPeaks(syncFeatures, hopSeconds)
   };
 }
 
@@ -993,40 +1002,60 @@ function estimateAudioSync(leftAudio, rightAudio) {
   }
 
   const hop = leftAudio.hopSeconds || 0.05;
-  const maxLag = Math.min(Math.round(20 / hop), Math.floor(Math.min(leftAudio.envelope.length, rightAudio.envelope.length) * 0.45));
-  const left = zNormalize(leftAudio.envelope);
-  const right = zNormalize(rightAudio.envelope);
+  const maxLag = Math.min(Math.round(35 / hop), Math.floor(Math.min(leftAudio.envelope.length, rightAudio.envelope.length) * 0.6));
+  const left = zNormalize(leftAudio.syncFeatures || leftAudio.envelope);
+  const right = zNormalize(rightAudio.syncFeatures || rightAudio.envelope);
+  const leftFlux = zNormalize(leftAudio.flux || leftAudio.envelope);
+  const rightFlux = zNormalize(rightAudio.flux || rightAudio.envelope);
   let bestLag = 0;
   let bestScore = -Infinity;
+  let secondBestScore = -Infinity;
 
   for (let lag = -maxLag; lag <= maxLag; lag += 1) {
-    let sum = 0;
+    let featureSum = 0;
+    let fluxSum = 0;
     let count = 0;
     for (let i = 0; i < left.length; i += 1) {
       const j = i + lag;
       if (j < 0 || j >= right.length) continue;
-      sum += left[i] * right[j];
+      featureSum += left[i] * right[j];
+      fluxSum += (leftFlux[i] || 0) * (rightFlux[j] || 0);
       count += 1;
     }
     if (count < 20) continue;
-    const score = sum / count;
+    const overlapPenalty = Math.min(1, count / Math.min(left.length, right.length));
+    const score = ((featureSum / count) * 0.72 + (fluxSum / count) * 0.28) * overlapPenalty;
     if (score > bestScore) {
+      secondBestScore = bestScore;
       bestScore = score;
       bestLag = lag;
+    } else if (score > secondBestScore) {
+      secondBestScore = score;
     }
   }
 
   const offsetSeconds = Number((bestLag * hop).toFixed(2));
-  const confidence = Math.max(0, Math.min(100, Math.round(((bestScore + 1) / 2) * 100)));
+  const peakSeparation = Math.max(0, bestScore - secondBestScore);
+  const confidence = Math.max(0, Math.min(100, Math.round(((bestScore + 1) / 2) * 78 + Math.min(22, peakSeparation * 120))));
   return {
     ready: true,
     offsetSeconds,
     confidence,
+    automaticOffsetSeconds: offsetSeconds,
     message:
       offsetSeconds >= 0
         ? `Правое видео читается на ${offsetSeconds.toFixed(2)} сек. вперед относительно эталона.`
         : `Правое видео читается на ${Math.abs(offsetSeconds).toFixed(2)} сек. назад относительно эталона.`
   };
+}
+
+function buildSyncFeatures(envelope, flux) {
+  return envelope.map((value, index) => {
+    const previous = envelope[index - 1] ?? value;
+    const next = envelope[index + 1] ?? value;
+    const localContrast = Math.max(0, value - (previous + next) / 2);
+    return value * 0.45 + (flux[index] || 0) * 0.4 + localContrast * 0.15;
+  });
 }
 
 function zNormalize(values) {
@@ -1047,6 +1076,26 @@ function formatTime(seconds) {
 
 function formatSeconds(seconds, digits = 1) {
   return Number.isFinite(seconds) ? `${seconds.toFixed(digits)} сек` : "-";
+}
+
+function effectiveSync(sync, manualSync) {
+  const baseOffset = sync?.ready ? Number(sync.offsetSeconds || 0) : 0;
+  const manualOffset = Number(manualSync?.offsetSeconds || 0);
+  const offsetSeconds = Number((baseOffset + manualOffset).toFixed(2));
+  return {
+    ...(sync || {}),
+    ready: Boolean(sync?.ready || manualOffset || manualSync?.useManualStarts),
+    offsetSeconds,
+    automaticOffsetSeconds: sync?.automaticOffsetSeconds ?? baseOffset,
+    manualOffsetSeconds: manualOffset,
+    message: `Итоговое смещение правого видео: ${offsetSeconds.toFixed(2)} сек.`
+  };
+}
+
+function clampVideoTime(value, duration = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return Number(Math.max(0, Math.min(numeric, duration || numeric)).toFixed(2));
 }
 
 function formatMetricValue(value, unit) {
@@ -1145,6 +1194,7 @@ const VideoPane = forwardRef(function VideoPane(
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState("");
+  const [isMuted, setIsMuted] = useState(true);
   const [scanProgress, setScanProgress] = useState(0);
   const [isScanning, setIsScanning] = useState(false);
   const [showCameraPrompt, setShowCameraPrompt] = useState(false);
@@ -1269,6 +1319,7 @@ const VideoPane = forwardRef(function VideoPane(
       video.srcObject = stream;
       video.loop = false;
       video.muted = true;
+      setIsMuted(true);
       await video.play();
       setIsPlaying(true);
       setMode("camera");
@@ -1294,8 +1345,12 @@ const VideoPane = forwardRef(function VideoPane(
     video.srcObject = null;
     video.src = URL.createObjectURL(file);
     video.loop = true;
-    video.muted = true;
-    video.play();
+    video.muted = isMuted;
+    video.play().catch(() => {
+      video.muted = true;
+      setIsMuted(true);
+      return video.play();
+    });
     setIsPlaying(true);
     setMode("file");
     setSourceName(file.name);
@@ -1337,6 +1392,13 @@ const VideoPane = forwardRef(function VideoPane(
     const nextTime = Number(event.target.value);
     video.currentTime = nextTime;
     setCurrentTime(nextTime);
+  }
+
+  function toggleSound() {
+    const video = videoRef.current;
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    if (video) video.muted = nextMuted;
   }
 
   async function scanSkeleton() {
@@ -1416,7 +1478,7 @@ const VideoPane = forwardRef(function VideoPane(
         <video
           ref={videoRef}
           playsInline
-          muted
+          muted={isMuted}
           onLoadedMetadata={handleLoadedMetadata}
           onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
           onPlay={() => setIsPlaying(true)}
@@ -1529,6 +1591,9 @@ const VideoPane = forwardRef(function VideoPane(
         <button type="button" onClick={togglePlay}>
           {isPlaying ? <Pause size={18} /> : <Play size={18} />}
           {isPlaying ? "Пауза" : "Старт"}
+        </button>
+        <button type="button" onClick={toggleSound}>
+          {isMuted ? "Включить звук" : "Выключить звук"}
         </button>
         <button type="button" onClick={reset}>
           <RotateCcw size={18} />
@@ -1939,7 +2004,7 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
   );
 }
 
-function WaveformTimeline({ leftAudio, rightAudio, sync }) {
+function WaveformTimeline({ leftAudio, rightAudio, sync, manualSync, onManualSyncChange, soundMode, onSoundModeChange, leftDuration = 0, rightDuration = 0 }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -1970,6 +2035,8 @@ function WaveformTimeline({ leftAudio, rightAudio, sync }) {
     }
   }, [leftAudio, rightAudio, sync]);
 
+  const updateManual = (patch) => onManualSyncChange({ ...manualSync, ...patch });
+
   return (
     <section className="sync-panel">
       <div className="sync-header">
@@ -1987,6 +2054,56 @@ function WaveformTimeline({ leftAudio, rightAudio, sync }) {
         </div>
       </div>
       <canvas ref={canvasRef} className="waveform-canvas" />
+      <div className="manual-sync-controls">
+        <label>
+          Ручная поправка дорожки, сек
+          <input
+            type="number"
+            step="0.05"
+            value={manualSync.offsetSeconds}
+            onChange={(event) => updateManual({ offsetSeconds: Number(event.target.value) || 0 })}
+          />
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={manualSync.useManualStarts}
+            onChange={(event) => updateManual({ useManualStarts: event.target.checked })}
+          />
+          Ручные старты видео
+        </label>
+        <label>
+          Старт эталона, сек
+          <input
+            type="number"
+            min="0"
+            max={leftDuration || undefined}
+            step="0.05"
+            value={manualSync.leftStart}
+            onChange={(event) => updateManual({ leftStart: clampVideoTime(event.target.value, leftDuration) })}
+          />
+        </label>
+        <label>
+          Старт правого, сек
+          <input
+            type="number"
+            min="0"
+            max={rightDuration || undefined}
+            step="0.05"
+            value={manualSync.rightStart}
+            onChange={(event) => updateManual({ rightStart: clampVideoTime(event.target.value, rightDuration) })}
+          />
+        </label>
+        <label>
+          Звук при прогоне
+          <select value={soundMode} onChange={(event) => onSoundModeChange(event.target.value)}>
+            <option value="left">Эталон</option>
+            <option value="right">Правое видео</option>
+            <option value="both">Оба видео</option>
+            <option value="muted">Без звука</option>
+          </select>
+        </label>
+      </div>
       <p className="sync-note">
         {sync?.ready
           ? `${sync.message} Уверенность аудио-сопоставления: ${sync.confidence}%.`
@@ -2275,11 +2392,14 @@ function App() {
   const [rightAudio, setRightAudio] = useState(null);
   const [leftAnalysisRange, setLeftAnalysisRange] = useState({ start: 0, end: 0 });
   const [sync, setSync] = useState({ ready: false, offsetSeconds: 0, confidence: 0 });
+  const [manualSync, setManualSync] = useState({ offsetSeconds: 0, leftStart: 0, rightStart: 0, useManualStarts: false });
+  const [soundMode, setSoundMode] = useState("left");
   const [audioStatus, setAudioStatus] = useState("");
   const [runState, setRunState] = useState({ status: "idle", progress: 0, result: null, message: "" });
   const [expectedScore, setExpectedScore] = useState("");
   const [labHistory, setLabHistory] = useState(() => loadLabHistory());
   const activeSpecs = useMemo(() => activeAngleSpecs(mediaPipeSettings.regions), [mediaPipeSettings.regions]);
+  const activeSync = useMemo(() => effectiveSync(sync, manualSync), [sync, manualSync]);
   const liveComparison = useMemo(() => {
     if (comparisonModel === "overlay") return compareOverlayFrames(leftPose, rightPose, mediaPipeSettings.regions);
     if (comparisonModel === "2026-07-06") {
@@ -2334,6 +2454,7 @@ function App() {
 
   async function handleAudio(side, file) {
     setSync({ ready: false, offsetSeconds: 0, confidence: 0 });
+    setManualSync({ offsetSeconds: 0, leftStart: 0, rightStart: 0, useManualStarts: false });
     setRunState({ status: "idle", progress: 0, result: null, message: "" });
     if (!file) {
       if (side === "left") setLeftAudio(null);
@@ -2355,18 +2476,16 @@ function App() {
   function synchronizeAudio() {
     const result = estimateAudioSync(leftAudio, rightAudio);
     setSync(result);
+    setManualSync((previous) => ({ ...previous, offsetSeconds: 0 }));
     setRunState({
       status: "ready",
       progress: 0,
       result: null,
-      message: result.ready ? "Синхронизация рассчитана. Запустите полный прогон видео." : result.message
+      message: result.ready ? "Синхронизация рассчитана. При необходимости подвиньте дорожку вручную и запустите полный прогон." : result.message
     });
-    if (result.ready && leftScan?.frames?.length && rightScan?.frames?.length) {
-      window.setTimeout(() => playSynchronizedAnalysis(result), 0);
-    }
   }
 
-  async function playSynchronizedAnalysis(syncOverride = sync) {
+  async function playSynchronizedAnalysis(syncOverride = activeSync) {
     if (!leftScan?.frames?.length || !rightScan?.frames?.length) {
       setRunState({
         status: "error",
@@ -2377,14 +2496,20 @@ function App() {
       return;
     }
 
-    const activeSync = syncOverride?.ready ? syncOverride : sync;
-    const offset = activeSync.ready ? activeSync.offsetSeconds : 0;
-    let leftStart = leftScan.frames?.[0]?.time ?? Math.max(0, -offset);
-    let rightStart = leftStart + offset;
+    const runSync = syncOverride?.ready ? syncOverride : activeSync;
+    const offset = runSync.ready ? runSync.offsetSeconds : 0;
+    let leftStart = manualSync.useManualStarts ? manualSync.leftStart : (leftScan.frames?.[0]?.time ?? Math.max(0, -offset));
+    let rightStart = manualSync.useManualStarts ? manualSync.rightStart : leftStart + offset;
     if (rightStart < 0) {
       leftStart = Math.min(leftScan.frames?.at(-1)?.time ?? leftStart, leftStart - rightStart);
       rightStart = 0;
     }
+    const playbackSync = {
+      ...runSync,
+      ready: true,
+      offsetSeconds: Number((rightStart - leftStart).toFixed(2)),
+      message: `Итоговое смещение правого видео: ${(rightStart - leftStart).toFixed(2)} сек.`
+    };
     const leftVideo = leftVideoRef.current?.video;
     const rightVideo = rightVideoRef.current?.video;
     const playableSeconds = Math.min(
@@ -2412,10 +2537,13 @@ function App() {
     leftVideoRef.current?.setLoop(false);
     rightVideoRef.current?.setLoop(false);
     try {
-      await Promise.all([leftVideoRef.current?.playAt(leftStart, false), rightVideoRef.current?.playAt(rightStart, false)]);
+      await Promise.all([
+        leftVideoRef.current?.playAt(leftStart, soundMode === "left" || soundMode === "both"),
+        rightVideoRef.current?.playAt(rightStart, soundMode === "right" || soundMode === "both")
+      ]);
     } catch (err) {
-      const result = compareByModel(comparisonModel, leftScan, rightScan, activeSync, mediaPipeSettings.regions, leftAudio);
-      saveLabExample(result, activeSync, "auto");
+      const result = compareByModel(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio);
+      saveLabExample(result, playbackSync, "auto");
       setRunState({
         status: "done",
         progress: 100,
@@ -2435,8 +2563,8 @@ function App() {
       if (elapsed >= playableSeconds - 0.05) {
         leftVideoRef.current?.pause();
         rightVideoRef.current?.pause();
-        const result = compareByModel(comparisonModel, leftScan, rightScan, activeSync, mediaPipeSettings.regions, leftAudio);
-        saveLabExample(result, activeSync, "auto");
+        const result = compareByModel(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio);
+        saveLabExample(result, playbackSync, "auto");
         setRunState({
           status: "done",
           progress: 100,
@@ -2477,11 +2605,12 @@ function App() {
       if (!freshRightScan?.frames?.length) throw new Error("Не удалось получить скан правого видео.");
       setRightScan(freshRightScan);
 
-      let activeSync = sync;
+      let activeRunSync = activeSync;
       if (leftAudio && rightAudio) {
-        activeSync = estimateAudioSync(leftAudio, rightAudio);
-        setSync(activeSync);
-        setAudioStatus(activeSync.ready ? "Автолаборатория рассчитала синхронизацию по аудио." : activeSync.message);
+        const automaticSync = estimateAudioSync(leftAudio, rightAudio);
+        setSync(automaticSync);
+        activeRunSync = effectiveSync(automaticSync, manualSync);
+        setAudioStatus(automaticSync.ready ? "Автолаборатория рассчитала синхронизацию по аудио." : automaticSync.message);
       }
 
       setRunState((previous) => ({
@@ -2492,11 +2621,11 @@ function App() {
 
       const results = runnableComparisonModelIds.map((modelId) => ({
         modelId,
-        result: compareByModel(modelId, freshLeftScan, freshRightScan, activeSync, mediaPipeSettings.regions, leftAudio)
+        result: compareByModel(modelId, freshLeftScan, freshRightScan, activeRunSync, mediaPipeSettings.regions, leftAudio)
       }));
 
       for (const { modelId, result } of results) {
-        saveLabExample(result, activeSync, "auto", modelId, freshLeftScan, freshRightScan);
+        saveLabExample(result, activeRunSync, "auto", modelId, freshLeftScan, freshRightScan);
       }
 
       const primary = results.find((item) => item.modelId === "2026-07-06")?.result || results[0]?.result || null;
@@ -2685,7 +2814,17 @@ function App() {
         />
       </section>
 
-      <WaveformTimeline leftAudio={leftAudio} rightAudio={rightAudio} sync={sync} />
+      <WaveformTimeline
+        leftAudio={leftAudio}
+        rightAudio={rightAudio}
+        sync={activeSync}
+        manualSync={manualSync}
+        onManualSyncChange={setManualSync}
+        soundMode={soundMode}
+        onSoundModeChange={setSoundMode}
+        leftDuration={leftScan?.duration || leftAudio?.duration || 0}
+        rightDuration={rightScan?.duration || rightAudio?.duration || 0}
+      />
 
       <div className="sync-actions">
         <button type="button" onClick={synchronizeAudio} disabled={!leftAudio || !rightAudio}>
@@ -2738,7 +2877,7 @@ function App() {
       <SkeletonOverlayViewer
         leftScan={leftScan}
         rightScan={rightScan}
-        sync={sync}
+        sync={activeSync}
         regions={mediaPipeSettings.regions}
         enabled={comparisonModel === "overlay"}
       />
@@ -2757,7 +2896,7 @@ function App() {
           <div className="metrics">
             <MetricCard label="Уверенность трекинга" value={`${confidence}%`} />
             <MetricCard label="Кадров сравнено" value={comparison.framesCompared || comparison.rows.length} />
-            <MetricCard label="Смещение аудио" value={sync.ready ? `${sync.offsetSeconds.toFixed(2)} сек` : "нет"} />
+            <MetricCard label="Смещение аудио" value={activeSync.ready ? `${activeSync.offsetSeconds.toFixed(2)} сек` : "нет"} />
             <MetricCard label="Лучший момент" value={comparison.bestScore != null ? `${comparison.bestScore}%` : "-"} />
             <MetricCard label="Худший момент" value={comparison.worstScore != null ? `${comparison.worstScore}%` : "-"} />
             <MetricCard label="Длительность анализа" value={comparison.durationCompared ? `${comparison.durationCompared} сек` : "-"} />
@@ -2813,7 +2952,7 @@ function App() {
         history={labHistory}
         expectedScore={expectedScore}
         onExpectedScoreChange={setExpectedScore}
-        onSave={() => saveLabExample(null, sync, "manual")}
+        onSave={() => saveLabExample(null, activeSync, "manual")}
         onExport={() => downloadJson("dmpa-lab-history.json", labHistory)}
         onClear={clearLabHistory}
         canSave={Boolean(runState.result?.ready)}
