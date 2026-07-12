@@ -47,18 +47,30 @@ const defaultMediaPipeSettings = {
 
 const comparisonModels = {
   angles: {
+    id: "angles",
+    version: "1.3.0",
+    versionLabel: "v1.3.0",
+    algorithmBuild: "angles-torso-fit-2026-07-12",
     title: "Углы",
     shortTitle: "1. Углы",
     description:
       "Базовая модель: сначала точно совмещает корпус правого скелета с эталоном, затем сравнивает углы локтей, плеч, бедер, коленей и корпуса на синхронных кадрах."
   },
   overlay: {
+    id: "overlay",
+    version: "1.1.0",
+    versionLabel: "v1.1.0",
+    algorithmBuild: "overlay-torso-fit-2026-07-12",
     title: "Наложение",
     shortTitle: "2. Наложение",
     description:
       "Скелеты нормализуются по центру корпуса и масштабу тела, затем накладываются друг на друга. Оценка строится по средней дистанции выбранных точек."
   },
   poses: {
+    id: "poses",
+    version: "1.0.0",
+    versionLabel: "v1.0.0",
+    algorithmBuild: "audio-impulse-poses-2026-07-05",
     title: "Позы",
     shortTitle: "3. Позы",
     description:
@@ -66,6 +78,9 @@ const comparisonModels = {
   },
   "2026-07-06": {
     id: "2026-07-06",
+    version: "1.2.0",
+    versionLabel: "v1.2.0",
+    algorithmBuild: "body-normalized-soft-sync-2026-07-06",
     name: "06.07.2026",
     title: "06.07.2026",
     shortTitle: "4. 06.07.2026",
@@ -74,6 +89,9 @@ const comparisonModels = {
   },
   "2026-07-12": {
     id: "2026-07-12",
+    version: "1.4.0",
+    versionLabel: "v1.4.0",
+    algorithmBuild: "elastic-dtw-tracking-filter-2026-07-12",
     name: "12.07.2026",
     title: "12.07.2026",
     shortTitle: "5. 12.07.2026",
@@ -82,6 +100,9 @@ const comparisonModels = {
   },
   "2026-07-13": {
     id: "2026-07-13",
+    version: "4.0.0",
+    versionLabel: "v4.0.0",
+    algorithmBuild: "choreography-stable-execution-2026-07-13",
     name: "13.07.2026",
     title: "13.07.2026",
     shortTitle: "6. 13.07.2026",
@@ -90,6 +111,9 @@ const comparisonModels = {
   },
   "all-auto": {
     id: "all-auto",
+    version: "1.0.0",
+    versionLabel: "v1.0.0",
+    algorithmBuild: "all-model-auto-run-2026-07-13",
     name: "Все модели + автосканирование",
     title: "Все модели + автосканирование",
     shortTitle: "7. Все модели",
@@ -2219,7 +2243,9 @@ function ComparisonModelPanel({ model, onChange }) {
       <div className="model-tabs">
         {Object.entries(comparisonModels).map(([key, item]) => (
           <button type="button" className={model === key ? "selected" : ""} onClick={() => onChange(key)} key={key}>
-            <strong>{item.shortTitle}</strong>
+            <strong>
+              {item.shortTitle} {item.versionLabel ? `· ${item.versionLabel}` : ""}
+            </strong>
             <span>{item.description}</span>
           </button>
         ))}
@@ -2340,6 +2366,7 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
               <span>{new Date(item.createdAt).toLocaleString()}</span>
               <div className="history-tags">
                 <b>{comparisonModels[item.comparisonModel]?.title || "Углы"}</b>
+                <b>{item.comparisonModelVersionLabel || item.comparisonModelDetails?.versionLabel || comparisonModels[item.comparisonModel]?.versionLabel || "без версии"}</b>
                 <b>{item.mediaPipeSettings?.modelVariant || "lite"}</b>
                 <b>{item.mediaPipeSettings?.landmarkSet === "full33" ? "33 точки" : "13 точек"}</b>
                 <b>{item.metrics?.framesCompared || 0} кадров</b>
@@ -3379,6 +3406,7 @@ function App() {
     const result = resultOverride || runState.result;
     if (!result?.ready) return;
     const savedModel = modelOverride === "all-auto" ? "angles" : modelOverride;
+    const savedModelDetails = comparisonModels[savedModel] || comparisonModels.angles;
     const activeLeftScan = leftScanOverride || leftScan;
     const activeRightScan = rightScanOverride || rightScan;
     const leftVideoProfile = fileProfile(leftFile, activeLeftScan, leftAudio);
@@ -3397,7 +3425,10 @@ function App() {
         sameFileCandidate: sameFileCandidate(leftVideoProfile, rightVideoProfile)
       },
       comparisonModel: savedModel,
-      comparisonModelDetails: comparisonModels[savedModel],
+      comparisonModelVersion: savedModelDetails.version,
+      comparisonModelVersionLabel: savedModelDetails.versionLabel,
+      comparisonAlgorithmBuild: savedModelDetails.algorithmBuild,
+      comparisonModelDetails: savedModelDetails,
       mediaPipeSettings: {
         ...mediaPipeSettings,
         activeAngles: activeSpecs.map((spec) => ({
