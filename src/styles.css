@@ -649,6 +649,10 @@ h3 {
   background: #407ee8;
 }
 
+.difference-color {
+  background: #ff6b6b;
+}
+
 .waveform-canvas {
   border: 1px solid #dbe4ef;
   border-radius: 8px;
@@ -765,6 +769,27 @@ h3 {
   display: block;
   height: 100%;
   transition: width 180ms ease;
+}
+
+.elastic-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.elastic-metrics span {
+  background: #f6f9fd;
+  border: 1px solid #dbe4ef;
+  border-radius: 999px;
+  color: #506276;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 7px 10px;
+}
+
+.elastic-metrics b {
+  color: #17202a;
 }
 
 .analysis-panel {

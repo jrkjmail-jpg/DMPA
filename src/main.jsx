@@ -1179,6 +1179,7 @@ const VideoPane = forwardRef(function VideoPane(
     analysisRange,
     onAnalysisRangeChange,
     mediaPipeSettings,
+    liveDetectionPaused = false,
     showAnalysisRange = false
   },
   ref
@@ -1238,6 +1239,13 @@ const VideoPane = forwardRef(function VideoPane(
   const analyzeFrame = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
+    if (liveDetectionPaused) {
+      const ctx = canvas?.getContext("2d");
+      if (ctx && canvas.width && canvas.height) ctx.clearRect(0, 0, canvas.width, canvas.height);
+      lastVideoTimeRef.current = -1;
+      rafRef.current = requestAnimationFrame(analyzeFrame);
+      return;
+    }
     if (isScanningRef.current) {
       rafRef.current = requestAnimationFrame(analyzeFrame);
       return;
@@ -1295,7 +1303,7 @@ const VideoPane = forwardRef(function VideoPane(
     }
 
     rafRef.current = requestAnimationFrame(analyzeFrame);
-  }, [analysisRange, landmarker, onPose, showAnalysisRange, side, specs]);
+  }, [analysisRange, landmarker, liveDetectionPaused, onPose, showAnalysisRange, side, specs]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(analyzeFrame);
@@ -2275,6 +2283,138 @@ function SkeletonOverlayViewer({ leftScan, rightScan, sync, regions, enabled }) 
   );
 }
 
+function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, enabled }) {
+  const canvasRef = useRef(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const pairs = useMemo(() => {
+    if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
+    const allPairs = synchronizedFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0);
+    const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
+    return allPairs.filter((_, index) => index % stride === 0);
+  }, [enabled, leftScan, rightScan, sync]);
+  const pair = pairs[currentIndex] || null;
+
+  useEffect(() => {
+    setCurrentIndex(0);
+    setIsPlaying(false);
+  }, [pairs.length]);
+
+  useEffect(() => {
+    if (!enabled || !isPlaying || pairs.length < 2) return undefined;
+    const timer = window.setInterval(() => {
+      setCurrentIndex((index) => (index + 1) % pairs.length);
+    }, 180);
+    return () => window.clearInterval(timer);
+  }, [enabled, isPlaying, pairs.length]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = "#101827";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    drawSkeletonGrid(ctx, rect.width, rect.height);
+
+    if (pair) {
+      const left = normalizeSkeleton(pair.leftFrame.landmarks);
+      const right = normalizeSkeleton(pair.rightFrame.landmarks);
+      drawSkeletonDifferences(ctx, left, right, rect.width, rect.height, regions);
+      drawNormalizedSkeleton(ctx, left, rect.width, rect.height, "#28d7a4", regions);
+      drawNormalizedSkeleton(ctx, right, rect.width, rect.height, "#55a4ff", regions);
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 13px Inter, sans-serif";
+      ctx.fillText(`12.07.2026: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
+    } else {
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 15px Inter, sans-serif";
+      ctx.fillText("Отсканируйте оба видео и запустите анализ модели 12.07.2026", 14, 28);
+    }
+  }, [pair, regions]);
+
+  const frameScore = pair ? compareOverlayFrames(pair.leftFrame, pair.rightFrame, regions).score : null;
+  const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").includes("2026-07-12")).slice(0, 4);
+
+  return (
+    <section className={`skeleton-lab elastic-lab ${enabled ? "" : "hidden"}`}>
+      <div className="sync-header">
+        <div>
+          <p className="eyebrow">Elastic Dance Lab</p>
+          <h2>Визуализация модели 12.07.2026</h2>
+        </div>
+        <div className="legend">
+          <span>
+            <i className="skeleton-left" /> эталон
+          </span>
+          <span>
+            <i className="skeleton-right" /> правое видео
+          </span>
+          <span>
+            <i className="difference-color" /> расхождение
+          </span>
+        </div>
+      </div>
+      <canvas ref={canvasRef} className="skeleton-canvas elastic-canvas" />
+      <div className="overlay-controls">
+        <button type="button" onClick={() => setIsPlaying((value) => !value)} disabled={!pairs.length}>
+          {isPlaying ? <Pause size={17} /> : <Play size={17} />}
+          {isPlaying ? "Пауза" : "Play"}
+        </button>
+        <button type="button" onClick={() => setCurrentIndex((index) => Math.max(0, index - 1))} disabled={!pairs.length}>
+          Назад
+        </button>
+        <input
+          type="range"
+          min="0"
+          max={Math.max(0, pairs.length - 1)}
+          step="1"
+          value={Math.min(currentIndex, Math.max(0, pairs.length - 1))}
+          onChange={(event) => {
+            setIsPlaying(false);
+            setCurrentIndex(Number(event.target.value));
+          }}
+          disabled={!pairs.length}
+        />
+        <button
+          type="button"
+          onClick={() => setCurrentIndex((index) => Math.min(Math.max(0, pairs.length - 1), index + 1))}
+          disabled={!pairs.length}
+        >
+          Вперед
+        </button>
+      </div>
+      <div className="overlay-meta">
+        <span>
+          Кадр {pairs.length ? currentIndex + 1 : 0}/{pairs.length}
+        </span>
+        <span>Эталон: {pair ? formatSeconds(pair.leftTime, 2) : "-"}</span>
+        <span>Правое: {pair ? formatSeconds(pair.rightTime, 2) : "-"}</span>
+        <span>Наложение кадра: {frameScore != null ? `${frameScore}%` : "-"}</span>
+        <span>Итог модели: {comparison?.ready ? `${comparison.score}%` : "-"}</span>
+      </div>
+      {modelRows.length > 0 && (
+        <div className="elastic-metrics">
+          {modelRows.map((row) => (
+            <span key={row.id}>
+              {row.title.replace("12.07.2026: ", "")}: <b>{row.score}%</b>
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="sync-note">
+        Это окно показывает сохраненные скелеты после скана, а не живой MediaPipe-детект. Красные связи подсвечивают расстояние между
+        одинаковыми точками эталона и правого видео на выбранном кадре.
+      </p>
+    </section>
+  );
+}
+
 function KeyPoseViewer({ comparison, enabled, regions }) {
   const moments = comparison?.poseMoments || [];
   return (
@@ -2369,6 +2509,31 @@ function drawNormalizedSkeleton(ctx, landmarks, width, height, color, regions) {
     ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+function drawSkeletonDifferences(ctx, leftLandmarks, rightLandmarks, width, height, regions) {
+  if (!leftLandmarks?.length || !rightLandmarks?.length) return;
+  const ids = overlayLandmarkIds(regions);
+  const centerX = width / 2;
+  const centerY = height * 0.52;
+  const scale = Math.min(width, height) * 0.22;
+  const project = (point) => ({ x: centerX + point.x * scale, y: centerY + point.y * scale });
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 107, 107, 0.72)";
+  ctx.lineWidth = 1.4;
+  ctx.setLineDash([4, 5]);
+  for (const id of ids) {
+    if (!leftLandmarks[id] || !rightLandmarks[id]) continue;
+    const left = project(leftLandmarks[id]);
+    const right = project(rightLandmarks[id]);
+    const gap = Math.hypot(left.x - right.x, left.y - right.y);
+    if (gap < 4) continue;
+    ctx.beginPath();
+    ctx.moveTo(left.x, left.y);
+    ctx.lineTo(right.x, right.y);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function App() {
@@ -2778,6 +2943,7 @@ function App() {
           }}
           scan={leftScan}
           active={Boolean(leftPose?.landmarks?.length)}
+          liveDetectionPaused={runState.status === "running"}
           showAnalysisRange
           analysisRange={leftAnalysisRange}
           mediaPipeSettings={mediaPipeSettings}
@@ -2810,6 +2976,7 @@ function App() {
           }}
           scan={rightScan}
           active={Boolean(rightPose?.landmarks?.length)}
+          liveDetectionPaused={runState.status === "running"}
           mediaPipeSettings={mediaPipeSettings}
         />
       </section>
@@ -2883,6 +3050,15 @@ function App() {
       />
 
       <KeyPoseViewer comparison={comparison} enabled={comparisonModel === "poses"} regions={mediaPipeSettings.regions} />
+
+      <ElasticDanceViewer
+        leftScan={leftScan}
+        rightScan={rightScan}
+        sync={activeSync}
+        comparison={comparison}
+        regions={mediaPipeSettings.regions}
+        enabled={comparisonModel === "2026-07-12"}
+      />
 
       <section className="analysis-panel">
         <div className="score-ring" style={{ "--score": comparison.score }}>
