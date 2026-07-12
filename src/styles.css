@@ -113,6 +113,25 @@ h1 {
   max-width: 920px;
 }
 
+.title-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+}
+
+.app-version-badge {
+  background: #eef7ff;
+  border: 1px solid #cfe0f4;
+  border-radius: 999px;
+  color: #315a7c;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+
 .subtitle {
   color: #506276;
   line-height: 1.5;

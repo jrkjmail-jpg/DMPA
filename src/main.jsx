@@ -21,6 +21,12 @@ const mediaPipeSettingsKey = "dmpa.mediapipe.settings.v1";
 const maxStoredLabItems = 20;
 const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
+const appVersion = {
+  name: "DMPA Lab",
+  version: "0.4.0",
+  versionLabel: "v0.4.0",
+  build: "ui-preview-stabilization-2026-07-13"
+};
 
 const modelUrls = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
@@ -2417,6 +2423,7 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
               </strong>
               <span>{new Date(item.createdAt).toLocaleString()}</span>
               <div className="history-tags">
+                <b>{item.appVersionLabel || item.appDetails?.versionLabel || "app без версии"}</b>
                 <b>{comparisonModels[item.comparisonModel]?.title || "Углы"}</b>
                 <b>{item.comparisonModelVersionLabel || item.comparisonModelDetails?.versionLabel || comparisonModels[item.comparisonModel]?.versionLabel || "без версии"}</b>
                 <b>{item.mediaPipeSettings?.modelVariant || "lite"}</b>
@@ -3466,6 +3473,10 @@ function App() {
     const nextItem = {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
+      appVersion: appVersion.version,
+      appVersionLabel: appVersion.versionLabel,
+      appBuild: appVersion.build,
+      appDetails: appVersion,
       leftFileName: leftFile?.name || "",
       rightFileName: rightFile?.name || "",
       saveMode,
@@ -3520,7 +3531,10 @@ function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">MediaPipe Pose Analyzer</p>
-          <h1>Сравнение скелетов в двух видео</h1>
+          <div className="title-row">
+            <h1>Сравнение скелетов в двух видео</h1>
+            <span className="app-version-badge">{appVersion.name} {appVersion.versionLabel}</span>
+          </div>
           <p className="subtitle">Левое видео - эталон. Правое видео оценивается и подгоняется относительно эталона.</p>
         </div>
         <div className="model-state">
