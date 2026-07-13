@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.3",
-  versionLabel: "v0.5.3",
-  build: "openai-worker-runtime-2026-07-13"
+  version: "0.5.4",
+  versionLabel: "v0.5.4",
+  build: "openai-humanized-scoring-2026-07-13"
 };
 
 const modelUrls = {
@@ -148,14 +148,14 @@ const comparisonModels = {
   },
   "openai-expert": {
     id: "openai-expert",
-    version: "0.1.0",
-    versionLabel: "v0.1.0",
-    algorithmBuild: "openai-api-choreography-review-2026-07-13",
+    version: "0.2.0",
+    versionLabel: "v0.2.0",
+    algorithmBuild: "openai-humanized-choreography-review-2026-07-13",
     name: "OpenAI эксперт",
     title: "OpenAI эксперт",
     shortTitle: "8. OpenAI эксперт",
     description:
-      "Серверная AI-модель: отправляет сжатые метрики и скелеты в OpenAI API, чтобы получить экспертную хореографическую оценку поверх локального анализа."
+      "Серверная AI-модель: оценивает танец как хореограф, игнорируя микродрожание и короткие сбои MediaPipe, но сохраняя их как качество трекинга."
   }
 };
 
@@ -593,6 +593,33 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
     model: comparisonModels["openai-expert"],
     task:
       "Оцени, насколько правое видео ученика повторяет левое эталонное видео педагога. Не путай качество трекинга MediaPipe с качеством танца.",
+    scoringPolicy: {
+      primaryQuestion:
+        "Насколько ученик визуально и хореографически повторяет эталонную фразу, как это оценил бы внимательный педагог.",
+      ignoreAsStudentErrors: [
+        "микродрожание точек MediaPipe",
+        "одиночные или короткие серии сломанных кадров",
+        "улетевшие кисти, ноги или голова, если соседние кадры показывают нормальную позу",
+        "резкие невозможные скачки суставов за доли секунды",
+        "мелкие отличия камеры, роста, комплекции, масштаба и положения в комнате"
+      ],
+      keepAsTrackingDiagnostics: [
+        "процент плохих или отброшенных кадров",
+        "потеря тела MediaPipe",
+        "перепутанные конечности",
+        "низкая уверенность скана"
+      ],
+      compareAsHumanWould: [
+        "общая хореографическая фраза",
+        "ритм и музыкальное попадание",
+        "корпус как главный якорь",
+        "амплитуда и направление движения",
+        "ключевые позы",
+        "руки и ноги с мягким допуском на 1-2 кадра"
+      ],
+      warning:
+        "Если локальная метрика резко снижена из-за trajectory/микрошумов, но корпус, руки, ноги, амплитуда и ритм подтверждают тот же танец, итоговую оценку нужно делать ближе к человеческой визуальной оценке, а не к шумной метрике."
+    },
     localBaseline: {
       method: local.method,
       score: local.score,
