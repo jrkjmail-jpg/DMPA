@@ -1,6 +1,31 @@
 const defaultModel = "gpt-5.2";
 
-export async function onRequestPost({ request, env }) {
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/openai-compare") return handleOpenAiCompare(request, env);
+    return env.ASSETS.fetch(request);
+  }
+};
+
+async function handleOpenAiCompare(request, env) {
+  if (request.method === "GET") {
+    return json({
+      ready: true,
+      message: "DMPA OpenAI comparison endpoint. Use POST with compressed skeleton metrics."
+    });
+  }
+
+  if (request.method !== "POST") {
+    return json(
+      {
+        ready: false,
+        error: `Метод ${request.method} не поддерживается. Используйте POST.`
+      },
+      405
+    );
+  }
+
   try {
     const apiKey = env.OPENAI_API_KEY;
     if (!apiKey) {
@@ -8,7 +33,7 @@ export async function onRequestPost({ request, env }) {
         {
           ready: false,
           error: "OPENAI_API_KEY не настроен в Cloudflare.",
-          message: "Добавьте секрет OPENAI_API_KEY в Cloudflare Pages/Workers, затем повторите анализ."
+          message: "Добавьте секрет OPENAI_API_KEY в Variables and secrets, затем сделайте redeploy."
         },
         503
       );
@@ -86,13 +111,6 @@ export async function onRequestPost({ request, env }) {
       500
     );
   }
-}
-
-export async function onRequestGet() {
-  return json({
-    ready: true,
-    message: "DMPA OpenAI comparison endpoint. Use POST with compressed skeleton metrics."
-  });
 }
 
 function extractResponseText(data) {

@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.2",
-  versionLabel: "v0.5.2",
-  build: "openai-expert-commentary-2026-07-13"
+  version: "0.5.3",
+  versionLabel: "v0.5.3",
+  build: "openai-worker-runtime-2026-07-13"
 };
 
 const modelUrls = {
