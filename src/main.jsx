@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.0",
-  versionLabel: "v0.5.0",
-  build: "openai-expert-model-2026-07-13"
+  version: "0.5.1",
+  versionLabel: "v0.5.1",
+  build: "openai-expert-diagnostics-2026-07-13"
 };
 
 const modelUrls = {
@@ -3726,7 +3726,12 @@ function App() {
         bestScore: result.bestScore ?? null,
         worstScore: result.worstScore ?? null,
         durationCompared: result.durationCompared ?? null,
-        worstMoment: result.worstMoment ?? null
+        worstMoment: result.worstMoment ?? null,
+        openAiReady: result.diagnostics?.openAiReady ?? null,
+        openAiModel: result.diagnostics?.openAiModel ?? null,
+        openAiConfidence: result.diagnostics?.openAiConfidence ?? null,
+        openAiTrackingQualityScore: result.diagnostics?.openAiTrackingQualityScore ?? null,
+        openAiError: result.diagnostics?.openAiError ?? null
       },
       angleRows: sampleEvenly(result.rows || [], maxStoredAngleRows),
       skeletons: {
@@ -3957,6 +3962,25 @@ function App() {
             <MetricCard label="Лучший момент" value={comparison.bestScore != null ? `${comparison.bestScore}%` : "-"} />
             <MetricCard label="Худший момент" value={comparison.worstScore != null ? `${comparison.worstScore}%` : "-"} />
             <MetricCard label="Длительность анализа" value={comparison.durationCompared ? `${comparison.durationCompared} сек` : "-"} />
+            {comparisonModel === "openai-expert" && (
+              <>
+                <MetricCard label="OpenAI API" value={comparison.diagnostics?.openAiReady ? "ответ получен" : "нет ответа"} />
+                <MetricCard label="OpenAI модель" value={comparison.diagnostics?.openAiModel || "-"} />
+                <MetricCard
+                  label="Уверенность OpenAI"
+                  value={comparison.diagnostics?.openAiConfidence != null ? `${comparison.diagnostics.openAiConfidence}%` : "-"}
+                />
+                <MetricCard
+                  label="Скан по OpenAI"
+                  value={
+                    comparison.diagnostics?.openAiTrackingQualityScore != null
+                      ? `${comparison.diagnostics.openAiTrackingQualityScore}%`
+                      : "-"
+                  }
+                />
+                {comparison.diagnostics?.openAiError && <MetricCard label="Ошибка OpenAI" value={comparison.diagnostics.openAiError} />}
+              </>
+            )}
             {comparison.diagnostics?.trackingOutliersSkipped > 0 && (
               <MetricCard label="Плохих кадров пропущено" value={comparison.diagnostics.trackingOutliersSkipped} />
             )}
