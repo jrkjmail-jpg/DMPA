@@ -52,7 +52,8 @@ test("standing person against dancing reference scores low", () => {
   const reference = makeDanceSequence();
   const user = makeDanceSequence({ freeze: true, jitter: 0.02 });
   const result = compareSkeletons_2026_07_13(reference, user);
-  assert.ok(result.finalScore <= 45, `expected <= 45, got ${result.finalScore}`);
+  assert.ok(result.finalScore <= 15, `expected <= 15, got ${result.finalScore}`);
+  assert.equal(result.diagnostics.scoringDecision.strongRepeatEvidence, false);
 });
 
 test("different moving choreography is not treated as excellent", () => {

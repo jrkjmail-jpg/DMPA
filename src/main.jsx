@@ -126,14 +126,14 @@ const comparisonModels = {
   },
   "2026-07-13": {
     id: "2026-07-13",
-    version: "4.1.0",
-    versionLabel: "v4.1.0",
-    algorithmBuild: "choreography-repeat-evidence-2026-07-13",
+    version: "4.2.0",
+    versionLabel: "v4.2.0",
+    algorithmBuild: "choreography-evidence-gated-2026-07-13",
     name: "13.07.2026",
     title: "13.07.2026",
     shortTitle: "6. 13.07.2026",
     description:
-      "Хореографическое сравнение: корпус как якорь, ключевые позы, мягкая задержка рук и робастная оценка двигательной фразы."
+      "Хореографическое сравнение: главный процент требует доказательства повторения движения, а корпус, ритм и качество скана остаются диагностикой."
   },
   "all-auto": {
     id: "all-auto",
@@ -3435,7 +3435,7 @@ function App() {
         saveLabExample(result, activeRunSync, "auto", modelId, freshLeftScan, freshRightScan);
       }
 
-      const primary = results.find((item) => item.modelId === "2026-07-06")?.result || results[0]?.result || null;
+      const primary = results.find((item) => item.modelId === "2026-07-13")?.result || results[0]?.result || null;
       setRunState({
         status: "done",
         progress: 100,

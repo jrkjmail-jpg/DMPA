@@ -82,7 +82,33 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
   const rawScore = clampScore(phraseScore * 0.56 + motionScore * 0.24 + bodyParts.torso * 0.08 + rhythmScore * 0.12);
   const stableExecutionScore = stableExecutionScoreFor({ bodyParts, rangeScore, rhythmScore, keyPoseScore, poseScore });
   const repeatScore = repeatChoreographyScoreFor({ bodyParts, rangeScore, rhythmScore, poseScore, keyPoseScore, frameHitScore, activityGate });
-  const finalScore = Math.min(Math.max(rawScore, stableExecutionScore, repeatScore), activityGate.ceiling, evidenceGate.ceiling);
+  const choreographyScore = choreographyScoreFor({
+    poseScore,
+    trajectoryScore,
+    rangeScore,
+    rhythmScore,
+    keyPoseScore,
+    frameHitScore,
+    anglePatternScore,
+    bodyParts
+  });
+  const scoringDecision = scoringDecisionFor({
+    rawScore,
+    stableExecutionScore,
+    repeatScore,
+    choreographyScore,
+    poseScore,
+    trajectoryScore,
+    rangeScore,
+    rhythmScore,
+    keyPoseScore,
+    frameHitScore,
+    anglePatternScore,
+    bodyParts,
+    activityGate,
+    evidenceGate
+  });
+  const finalScore = scoringDecision.finalScore;
   const weakPoints = weakPointsFor({
     poseScore,
     trajectoryScore,
@@ -93,7 +119,8 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
     frameHitScore,
     activityGate,
     evidenceGate,
-    trackingQualityGate
+    trackingQualityGate,
+    scoringDecision
   });
   const worst = worstMomentFor(alignment.path, referenceFrames, userFrames);
 
@@ -112,6 +139,7 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
     frameHitScore,
     anglePatternScore,
     phraseScore,
+    choreographyScore,
     stableExecutionScore,
     repeatScore,
     bodyParts,
@@ -125,6 +153,7 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
       activityGate,
       evidenceGate,
       trackingQualityGate,
+      scoringDecision,
       weakPoints,
       missingJoints: [],
       confidence: confidenceFor(referenceFrames, userFrames)
@@ -139,6 +168,7 @@ export function compareSkeletons_2026_07_13(referenceSkeleton, userSkeleton, opt
       frameHitScore,
       anglePatternScore,
       phraseScore,
+      choreographyScore,
       stableExecutionScore,
       repeatScore,
       trackingQualityGate
@@ -716,6 +746,97 @@ function stableExecutionScoreFor({ bodyParts, rangeScore, rhythmScore, keyPoseSc
   );
 }
 
+function choreographyScoreFor({ poseScore, trajectoryScore, rangeScore, rhythmScore, keyPoseScore, frameHitScore, anglePatternScore, bodyParts }) {
+  const movementRhythmScore = motionBackedRhythmScore(rhythmScore, trajectoryScore, rangeScore);
+  return clampScore(
+    keyPoseScore * 0.18 +
+      frameHitScore * 0.12 +
+      anglePatternScore * 0.18 +
+      trajectoryScore * 0.14 +
+      rangeScore * 0.18 +
+      movementRhythmScore * 0.08 +
+      (bodyParts.arms || 0) * 0.08 +
+      (bodyParts.legs || 0) * 0.02 +
+      poseScore * 0.02
+  );
+}
+
+function motionBackedRhythmScore(rhythmScore, trajectoryScore, rangeScore) {
+  const motionEvidence = clampScore(rangeScore * 0.65 + trajectoryScore * 0.35 + 15);
+  return Math.min(rhythmScore, motionEvidence);
+}
+
+function scoringDecisionFor({
+  rawScore,
+  stableExecutionScore,
+  repeatScore,
+  choreographyScore,
+  poseScore,
+  trajectoryScore,
+  rangeScore,
+  rhythmScore,
+  keyPoseScore,
+  frameHitScore,
+  anglePatternScore,
+  bodyParts,
+  activityGate,
+  evidenceGate
+}) {
+  const movementRhythmScore = motionBackedRhythmScore(rhythmScore, trajectoryScore, rangeScore);
+  const strongRepeatEvidence =
+    rangeScore >= 76 &&
+    movementRhythmScore >= 68 &&
+    keyPoseScore >= 70 &&
+    frameHitScore >= 74 &&
+    anglePatternScore >= 70 &&
+    (bodyParts.arms || 0) >= 82 &&
+    (bodyParts.legs || 0) >= 80;
+  const partialRepeatEvidence =
+    rangeScore >= 62 &&
+    movementRhythmScore >= 58 &&
+    keyPoseScore >= 66 &&
+    frameHitScore >= 68 &&
+    anglePatternScore >= 66 &&
+    (bodyParts.arms || 0) >= 76;
+
+  let ceiling = Math.min(activityGate?.ceiling ?? 100, evidenceGate?.ceiling ?? 100);
+  const reasons = [];
+
+  if (rangeScore < 18) {
+    ceiling = Math.min(ceiling, 12);
+    reasons.push("амплитуда движения почти отсутствует относительно эталона");
+  } else if (rangeScore < 32 && trajectoryScore < 55) {
+    ceiling = Math.min(ceiling, 24);
+    reasons.push("движения недостаточно, чтобы считать фразу выполненной");
+  }
+
+  if (!partialRepeatEvidence && trajectoryScore < 48 && rangeScore < 62 && keyPoseScore < 72) {
+    ceiling = Math.min(ceiling, 38);
+    reasons.push("нет достаточного совпадения ключевых поз, траектории и амплитуды");
+  }
+
+  if (!partialRepeatEvidence && frameHitScore < 68 && anglePatternScore < 70) {
+    ceiling = Math.min(ceiling, 42);
+    reasons.push("кадры и угловой рисунок не подтверждают повторение");
+  }
+
+  const repeatLift = strongRepeatEvidence ? repeatScore : partialRepeatEvidence ? Math.min(repeatScore, choreographyScore + 12) : choreographyScore;
+  const evidenceScore = strongRepeatEvidence
+    ? Math.max(choreographyScore, repeatLift, stableExecutionScore)
+    : Math.min(Math.max(choreographyScore, repeatLift), rawScore);
+  const finalScore = Math.min(clampScore(evidenceScore), ceiling);
+
+  return {
+    finalScore,
+    ceiling,
+    choreographyScore,
+    movementRhythmScore: clampScore(movementRhythmScore),
+    strongRepeatEvidence,
+    partialRepeatEvidence,
+    reasons
+  };
+}
+
 function repeatChoreographyScoreFor({ bodyParts, rangeScore, rhythmScore, poseScore, keyPoseScore, frameHitScore, activityGate }) {
   if (activityGate?.ceiling < 90) return activityGate.ceiling;
   const limbFloor = Math.min(bodyParts.arms || 0, bodyParts.legs || 0);
@@ -830,11 +951,13 @@ function rowsFor({
   frameHitScore,
   anglePatternScore,
   phraseScore,
+  choreographyScore,
   stableExecutionScore,
   repeatScore,
   trackingQualityGate
 }) {
   return [
+    row("2026-07-13-choreography", "13.07.2026: доказательство хореографии", choreographyScore),
     row("2026-07-13-phrase", "13.07.2026: хореографическая фраза", phraseScore),
     row("2026-07-13-repeat", "13.07.2026: устойчивый повтор", repeatScore),
     row("2026-07-13-stable-execution", "13.07.2026: устойчивое исполнение", stableExecutionScore),
@@ -865,11 +988,15 @@ function weakPointsFor({
   frameHitScore,
   activityGate,
   evidenceGate,
-  trackingQualityGate
+  trackingQualityGate,
+  scoringDecision
 }) {
   const weak = [];
   if (trackingQualityGate?.ceiling < 90) {
     weak.push(`Скан требует осторожности: отброшено до ${Math.round((trackingQualityGate.worstSkippedRatio || 0) * 100)}% кадров.`);
+  }
+  if (scoringDecision?.reasons?.length) {
+    weak.push(`Итог ограничен: ${scoringDecision.reasons.join(", ")}.`);
   }
   if (activityGate?.ceiling < 90) weak.push(`Активность движения ниже эталона: потолок оценки ${activityGate.ceiling}%.`);
   if (evidenceGate?.ceiling < 90) weak.push(`Двигательная фраза ограничила оценку: ${evidenceGate.reason.join(", ")}.`);
