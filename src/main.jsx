@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.4.0",
-  versionLabel: "v0.4.0",
-  build: "ui-preview-stabilization-2026-07-13"
+  version: "0.5.0",
+  versionLabel: "v0.5.0",
+  build: "openai-expert-model-2026-07-13"
 };
 
 const modelUrls = {
@@ -145,6 +145,17 @@ const comparisonModels = {
     shortTitle: "7. Все модели",
     description:
       "Лабораторный режим: одной кнопкой сканирует оба видео, затем прогоняет все доступные модели и сохраняет результаты в историю."
+  },
+  "openai-expert": {
+    id: "openai-expert",
+    version: "0.1.0",
+    versionLabel: "v0.1.0",
+    algorithmBuild: "openai-api-choreography-review-2026-07-13",
+    name: "OpenAI эксперт",
+    title: "OpenAI эксперт",
+    shortTitle: "8. OpenAI эксперт",
+    description:
+      "Серверная AI-модель: отправляет сжатые метрики и скелеты в OpenAI API, чтобы получить экспертную хореографическую оценку поверх локального анализа."
   }
 };
 
@@ -478,12 +489,191 @@ function compareScans(leftScan, rightScan, sync, regions = defaultMediaPipeSetti
 }
 
 function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio) {
+  if (model === "openai-expert") return pendingOpenAiComparison();
   if (model === "overlay") return compareOverlayScans(leftScan, rightScan, sync, regions);
   if (model === "poses") return compareImpulsePoseScans(leftScan, rightScan, sync, regions, leftAudio);
   if (model === "2026-07-06") return compareScans20260706(leftScan, rightScan, sync);
   if (model === "2026-07-12") return compareScans20260712(leftScan, rightScan, sync);
   if (model === "2026-07-13") return compareScans20260713(leftScan, rightScan, sync);
   return compareScans(leftScan, rightScan, sync, regions);
+}
+
+async function compareByModelAsync(model, leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings) {
+  if (model === "openai-expert") return compareScansOpenAiExpert(leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings);
+  return compareByModel(model, leftScan, rightScan, sync, regions, leftAudio);
+}
+
+function pendingOpenAiComparison() {
+  return {
+    ready: false,
+    method: "OpenAI эксперт",
+    score: 0,
+    finalScore: 0,
+    rows: [],
+    suggestions: [],
+    framesCompared: 0,
+    diagnostics: {
+      weakPoints: ["Запустите полный анализ: OpenAI эксперт работает через серверный API и не считается в live-режиме."],
+      confidence: 0
+    },
+    verdict: "OpenAI эксперт готов к расчету после полного анализа сохраненных скелетов."
+  };
+}
+
+async function compareScansOpenAiExpert(leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings) {
+  const local = compareScans20260713(leftScan, rightScan, sync);
+  const payload = buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings, local });
+  let response = null;
+  let data = null;
+  try {
+    response = await fetch("/api/openai-compare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    data = await response.json().catch(() => null);
+  } catch (err) {
+    data = { message: err instanceof Error ? err.message : String(err) };
+  }
+  if (!response?.ok || !data?.ready) {
+    const detail = data?.message || data?.error || `HTTP ${response?.status || 0}`;
+    return {
+      ...local,
+      method: "OpenAI эксперт",
+      score: local.score,
+      finalScore: local.score,
+      diagnostics: {
+        ...(local.diagnostics || {}),
+        openAiReady: false,
+        openAiError: detail
+      },
+      rows: [
+        ...(local.rows || []),
+        rowPercent("openai-expert-status", "OpenAI эксперт: статус", 0)
+      ],
+      suggestions: [`OpenAI эксперт не рассчитался: ${detail}`, ...(local.suggestions || [])].slice(0, 8),
+      verdict: `OpenAI эксперт недоступен, показана локальная оценка ${local.score}%. Причина: ${detail}`
+    };
+  }
+  const aiScore = clampPercent(data.score ?? data.finalScore ?? local.score);
+  const rows = [
+    rowPercent("openai-expert-score", "OpenAI эксперт: итоговая оценка", aiScore),
+    rowPercent("openai-expert-choreography", "OpenAI эксперт: хореография", data.choreographyScore ?? aiScore),
+    rowPercent("openai-expert-tracking", "OpenAI эксперт: надежность скана", data.trackingQualityScore ?? local.diagnostics?.trackingQualityGate?.ceiling ?? 100),
+    ...(local.rows || []).slice(0, 8)
+  ];
+  return {
+    ...local,
+    ready: true,
+    method: "OpenAI эксперт",
+    score: aiScore,
+    finalScore: aiScore,
+    poseScore: clampPercent(data.choreographyScore ?? local.poseScore),
+    motionScore: clampPercent(data.choreographyScore ?? local.motionScore),
+    timingScore: clampPercent(data.rhythmScore ?? local.timingScore),
+    rows,
+    suggestions: Array.isArray(data.suggestions) && data.suggestions.length ? data.suggestions.slice(0, 8) : local.suggestions,
+    diagnostics: {
+      ...(local.diagnostics || {}),
+      openAiReady: true,
+      openAiModel: data.openAiModel || "server-default",
+      openAiConfidence: clampPercent(data.confidence ?? 70),
+      openAiTrackingQualityScore: clampPercent(data.trackingQualityScore ?? 100),
+      openAiReasoning: data.reasoning || ""
+    },
+    verdict: data.verdict || `OpenAI эксперт оценил повторение на ${aiScore}%.`,
+    bestScore: clampPercent(data.bestScore ?? local.bestScore),
+    worstScore: clampPercent(data.worstScore ?? local.worstScore)
+  };
+}
+
+function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings, local }) {
+  return {
+    appVersion,
+    model: comparisonModels["openai-expert"],
+    task:
+      "Оцени, насколько правое видео ученика повторяет левое эталонное видео педагога. Не путай качество трекинга MediaPipe с качеством танца.",
+    localBaseline: {
+      method: local.method,
+      score: local.score,
+      rows: (local.rows || []).slice(0, 14),
+      bodyParts: local.bodyParts || null,
+      diagnostics: local.diagnostics || {},
+      suggestions: local.suggestions || [],
+      verdict: local.verdict || ""
+    },
+    sync: sync || null,
+    mediaPipeSettings: mediaPipeSettings || null,
+    regions: regions || null,
+    audio: {
+      hasReferenceAudio: Boolean(leftAudio),
+      referenceDuration: leftAudio?.duration || leftScan?.duration || 0,
+      userDuration: rightScan?.duration || 0
+    },
+    scans: {
+      reference: compactScanForAi(leftScan),
+      user: compactScanForAi(rightScan)
+    },
+    expectedOutput:
+      "Верни JSON: score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore, worstScore, verdict, reasoning, suggestions."
+  };
+}
+
+function compactScanForAi(scan) {
+  const frames = scan?.frames || [];
+  const sampled = sampleEvenly(frames, 36).map((frame) => ({
+    time: Number((frame.time ?? 0).toFixed(2)),
+    confidence: Number((frame.confidence ?? 0).toFixed(2)),
+    angles: compactAngles(frame.angles),
+    landmarks: compactAiLandmarks(frame.landmarks)
+  }));
+  return {
+    duration: Number((scan?.duration || frames.at(-1)?.time || 0).toFixed(2)),
+    frameCount: frames.length,
+    range: scan?.range || null,
+    video: scan?.video || null,
+    frames: sampled
+  };
+}
+
+function compactAngles(angles = {}) {
+  return Object.fromEntries(
+    Object.entries(angles)
+      .filter(([, value]) => Number.isFinite(value))
+      .map(([key, value]) => [key, Number(value.toFixed(1))])
+  );
+}
+
+function compactAiLandmarks(landmarks = []) {
+  const ids = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+  return Object.fromEntries(
+    ids
+      .map((id) => {
+        const point = landmarks?.[id];
+        if (!point) return null;
+        return [
+          id,
+          {
+            x: Number(point.x.toFixed(4)),
+            y: Number(point.y.toFixed(4)),
+            z: Number((point.z || 0).toFixed(4)),
+            visibility: Number((point.visibility ?? 0).toFixed(2))
+          }
+        ];
+      })
+      .filter(Boolean)
+  );
+}
+
+function rowPercent(id, title, value) {
+  const score = clampPercent(value);
+  return { id, title, leftValue: score, rightValue: 100, diff: 100 - score, unit: "%", score };
+}
+
+function clampPercent(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, Math.round(number)));
 }
 
 function compareScans20260706(leftScan, rightScan, sync) {
@@ -3202,6 +3392,7 @@ function App() {
   const activeSpecs = useMemo(() => activeAngleSpecs(mediaPipeSettings.regions), [mediaPipeSettings.regions]);
   const activeSync = useMemo(() => effectiveSync(sync, manualSync), [sync, manualSync]);
   const liveComparison = useMemo(() => {
+    if (comparisonModel === "openai-expert") return pendingOpenAiComparison();
     if (comparisonModel === "overlay") return compareOverlayFrames(leftPose, rightPose, mediaPipeSettings.regions);
     if (comparisonModel === "2026-07-06") {
       return compareSkeletons_2026_07_06(
@@ -3349,7 +3540,7 @@ function App() {
         rightVideoRef.current?.playAt(rightStart, soundMode === "right" || soundMode === "both")
       ]);
     } catch (err) {
-      const result = compareByModel(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio);
+      const result = await compareByModelAsync(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio, mediaPipeSettings);
       saveLabExample(result, playbackSync, "auto");
       setRunState({
         status: "done",
@@ -3370,14 +3561,30 @@ function App() {
       if (elapsed >= playableSeconds - 0.05) {
         leftVideoRef.current?.pause();
         rightVideoRef.current?.pause();
-        const result = compareByModel(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio);
-        saveLabExample(result, playbackSync, "auto");
-        setRunState({
-          status: "done",
-          progress: 100,
-          result,
-          message: `Прогон завершен: проанализировано ${result.framesCompared || 0} синхронизированных кадров.`
-        });
+        setRunState((previous) => ({
+          ...previous,
+          progress: 96,
+          message: comparisonModel === "openai-expert" ? "Видео прогнано. OpenAI эксперт анализирует метрики и скелеты." : previous.message
+        }));
+        compareByModelAsync(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio, mediaPipeSettings)
+          .then((result) => {
+            saveLabExample(result, playbackSync, "auto");
+            setRunState({
+              status: "done",
+              progress: 100,
+              result,
+              message: `Прогон завершен: проанализировано ${result.framesCompared || 0} синхронизированных кадров.`
+            });
+          })
+          .catch((err) => {
+            const detail = err instanceof Error ? err.message : String(err);
+            setRunState({
+              status: "error",
+              progress: 0,
+              result: null,
+              message: `OpenAI эксперт не смог завершить анализ: ${detail}`
+            });
+          });
         return;
       }
 
@@ -3426,10 +3633,21 @@ function App() {
         message: "Автолаборатория: прогоняю все модели сравнения."
       }));
 
-      const results = runnableComparisonModelIds.map((modelId) => ({
-        modelId,
-        result: compareByModel(modelId, freshLeftScan, freshRightScan, activeRunSync, mediaPipeSettings.regions, leftAudio)
-      }));
+      const results = [];
+      for (const [index, modelId] of runnableComparisonModelIds.entries()) {
+        setRunState((previous) => ({
+          ...previous,
+          progress: Math.min(96, 72 + Math.round((index / Math.max(1, runnableComparisonModelIds.length)) * 24)),
+          message:
+            modelId === "openai-expert"
+              ? "Автолаборатория: OpenAI эксперт анализирует сжатые метрики."
+              : `Автолаборатория: рассчитываю модель "${comparisonModels[modelId]?.title || modelId}".`
+        }));
+        results.push({
+          modelId,
+          result: await compareByModelAsync(modelId, freshLeftScan, freshRightScan, activeRunSync, mediaPipeSettings.regions, leftAudio, mediaPipeSettings)
+        });
+      }
 
       for (const { modelId, result } of results) {
         saveLabExample(result, activeRunSync, "auto", modelId, freshLeftScan, freshRightScan);
