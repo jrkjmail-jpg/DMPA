@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.4.0",
-  versionLabel: "v0.4.0",
-  build: "ui-preview-stabilization-2026-07-13"
+  version: "0.4.1",
+  versionLabel: "v0.4.1",
+  build: "student-performance-scenario-2026-07-13"
 };
 
 const modelUrls = {
@@ -1621,6 +1621,39 @@ function sameFileCandidate(left, right) {
   return left.name === right.name && left.size === right.size && durationDiff < 0.05;
 }
 
+function performanceSummaryFor(result, isSelfCheck = false) {
+  const score = Number.isFinite(result?.score) ? Math.max(0, Math.min(100, Math.round(result.score))) : 0;
+  if (isSelfCheck) {
+    return {
+      scenarioRole: "SELF_CHECK",
+      scenarioLabel: "Техническая проверка",
+      studentPerformanceScore: null,
+      starRating: null,
+      awardEligible: false,
+      scoreLabel: "техпроверка",
+      explanation: "Одинаковые файлы проверяют стабильность алгоритма и не считаются оценкой ученика."
+    };
+  }
+  return {
+    scenarioRole: "STUDENT_PERFORMANCE",
+    scenarioLabel: "Оценка ученика",
+    studentPerformanceScore: score,
+    starRating: starRatingFor(score),
+    awardEligible: score >= 40,
+    scoreLabel: "оценка ученика",
+    explanation: "Правое видео оценивается как новая попытка ученика повторить эталон педагога."
+  };
+}
+
+function starRatingFor(score) {
+  if (score >= 95) return 5;
+  if (score >= 83) return 4;
+  if (score >= 70) return 3;
+  if (score >= 55) return 2;
+  if (score >= 40) return 1;
+  return 0;
+}
+
 const VideoPane = forwardRef(function VideoPane(
   {
     title,
@@ -2419,7 +2452,7 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
           history.slice(0, 8).map((item) => (
             <article key={item.id} className="history-item">
               <strong>
-                {item.score}% схожесть{item.expectedScore != null ? ` / ожидалось ${item.expectedScore}%` : ""}
+                {item.score}% модель{item.studentPerformanceScore != null ? ` / ученик ${item.studentPerformanceScore}%` : ""}{item.expectedScore != null ? ` / ожидалось ${item.expectedScore}%` : ""}
               </strong>
               <span>{new Date(item.createdAt).toLocaleString()}</span>
               <div className="history-tags">
@@ -2430,6 +2463,8 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
                 <b>{item.mediaPipeSettings?.landmarkSet === "full33" ? "33 точки" : "13 точек"}</b>
                 <b>{item.metrics?.framesCompared || 0} кадров</b>
                 <b>{item.saveMode === "auto" ? "авто" : "ручное"}</b>
+                <b>{item.scenarioLabel || (item.videos?.sameFileCandidate ? "Техпроверка" : "Оценка ученика")}</b>
+                <b>{item.starRating == null ? "без звезд" : `${item.starRating}/5 звезд`}</b>
                 <b>{item.videos?.sameFileCandidate ? "похоже один файл" : "файлы различаются"}</b>
               </div>
               <div className="file-facts">
@@ -3229,6 +3264,11 @@ function App() {
       ? ((leftScan?.averageConfidence || 0) + (rightScan?.averageConfidence || 0)) * 50
       : ((leftPose?.confidence || 0) + (rightPose?.confidence || 0)) * 50
   );
+  const performanceSummary = useMemo(() => {
+    const leftProfile = fileProfile(leftFile, leftScan, leftAudio);
+    const rightProfile = fileProfile(rightFile, rightScan, rightAudio);
+    return performanceSummaryFor(comparison, sameFileCandidate(leftProfile, rightProfile));
+  }, [comparison, leftAudio, leftFile, leftScan, rightAudio, rightFile, rightScan]);
 
   useEffect(() => () => cancelAnimationFrame(analysisRafRef.current), []);
 
@@ -3470,6 +3510,8 @@ function App() {
     const activeRightScan = rightScanOverride || rightScan;
     const leftVideoProfile = fileProfile(leftFile, activeLeftScan, leftAudio);
     const rightVideoProfile = fileProfile(rightFile, activeRightScan, rightAudio);
+    const sameFile = sameFileCandidate(leftVideoProfile, rightVideoProfile);
+    const savedPerformance = performanceSummaryFor(result, sameFile);
     const nextItem = {
       id: crypto.randomUUID(),
       createdAt: new Date().toISOString(),
@@ -3482,10 +3524,15 @@ function App() {
       saveMode,
       expectedScore: expectedScore === "" ? null : Number(expectedScore),
       score: result.score,
+      scenarioRole: savedPerformance.scenarioRole,
+      scenarioLabel: savedPerformance.scenarioLabel,
+      studentPerformanceScore: savedPerformance.studentPerformanceScore,
+      starRating: savedPerformance.starRating,
+      awardEligible: savedPerformance.awardEligible,
       videos: {
         left: leftVideoProfile,
         right: rightVideoProfile,
-        sameFileCandidate: sameFileCandidate(leftVideoProfile, rightVideoProfile)
+        sameFileCandidate: sameFile
       },
       comparisonModel: savedModel,
       comparisonModelVersion: savedModelDetails.version,
@@ -3508,7 +3555,11 @@ function App() {
         bestScore: result.bestScore ?? null,
         worstScore: result.worstScore ?? null,
         durationCompared: result.durationCompared ?? null,
-        worstMoment: result.worstMoment ?? null
+        worstMoment: result.worstMoment ?? null,
+        studentPerformanceScore: savedPerformance.studentPerformanceScore,
+        starRating: savedPerformance.starRating,
+        awardEligible: savedPerformance.awardEligible,
+        scenarioRole: savedPerformance.scenarioRole
       },
       angleRows: sampleEvenly(result.rows || [], maxStoredAngleRows),
       skeletons: {
@@ -3727,12 +3778,18 @@ function App() {
         <div className="score-ring" style={{ "--score": comparison.score }}>
           <div>
             <span>{comparison.score}%</span>
-            <small>схожесть</small>
+            <small>{performanceSummary.scoreLabel}</small>
           </div>
         </div>
 
         <div className="analysis-body">
           <div className="metrics">
+            <MetricCard label="Сценарий" value={performanceSummary.scenarioLabel} />
+            <MetricCard
+              label="Оценка ученика"
+              value={performanceSummary.studentPerformanceScore == null ? "-" : `${performanceSummary.studentPerformanceScore}%`}
+            />
+            <MetricCard label="Звезды" value={performanceSummary.starRating == null ? "-" : `${performanceSummary.starRating}/5`} />
             <MetricCard label="Уверенность трекинга" value={`${confidence}%`} />
             <MetricCard label="Кадров сравнено" value={comparison.framesCompared || comparison.rows.length} />
             <MetricCard label="Смещение аудио" value={activeSync.ready ? `${activeSync.offsetSeconds.toFixed(2)} сек` : "нет"} />
@@ -3755,6 +3812,7 @@ function App() {
 
           <div className="verdict">
             <h2>Анализ правого видео относительно эталона</h2>
+            <p>{performanceSummary.explanation}</p>
             <p>{comparison.verdict}</p>
             {comparison.worstMoment && (
               <p className="worst-moment">
