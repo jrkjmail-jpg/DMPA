@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.4",
-  versionLabel: "v0.5.4",
-  build: "openai-humanized-scoring-2026-07-13"
+  version: "0.5.5",
+  versionLabel: "v0.5.5",
+  build: "openai-human-commentary-2026-07-13"
 };
 
 const modelUrls = {
@@ -148,14 +148,14 @@ const comparisonModels = {
   },
   "openai-expert": {
     id: "openai-expert",
-    version: "0.2.0",
-    versionLabel: "v0.2.0",
-    algorithmBuild: "openai-humanized-choreography-review-2026-07-13",
+    version: "0.3.0",
+    versionLabel: "v0.3.0",
+    algorithmBuild: "openai-human-choreographer-commentary-2026-07-13",
     name: "OpenAI эксперт",
     title: "OpenAI эксперт",
     shortTitle: "8. OpenAI эксперт",
     description:
-      "Серверная AI-модель: оценивает танец как хореограф, игнорируя микродрожание и короткие сбои MediaPipe, но сохраняя их как качество трекинга."
+      "Серверная AI-модель: оценивает танец как хореограф, игнорируя микродрожание и короткие сбои MediaPipe, а комментарий пишет живым педагогическим языком."
   }
 };
 
@@ -581,7 +581,7 @@ async function compareScansOpenAiExpert(leftScan, rightScan, sync, regions, left
       openAiTrackingQualityScore: clampPercent(data.trackingQualityScore ?? 100),
       openAiReasoning: data.reasoning || ""
     },
-    verdict: data.verdict || `OpenAI эксперт оценил повторение на ${aiScore}%.`,
+    verdict: data.verdict || "OpenAI эксперт видит, что ученик в целом повторяет эталон, но отдельные моменты стоит разобрать внимательнее.",
     bestScore: clampPercent(data.bestScore ?? local.bestScore),
     worstScore: clampPercent(data.worstScore ?? local.worstScore)
   };
@@ -620,6 +620,16 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
       warning:
         "Если локальная метрика резко снижена из-за trajectory/микрошумов, но корпус, руки, ноги, амплитуда и ритм подтверждают тот же танец, итоговую оценку нужно делать ближе к человеческой визуальной оценке, а не к шумной метрике."
     },
+    commentStyle: {
+      goal:
+        "Текстовые поля verdict, reasoning и suggestions должны звучать как комментарий педагога-хореографа после просмотра ученика.",
+      use:
+        "Пиши про ощущение движения, корпус, музыкальность, амплитуду, собранность формы, руки, ноги, акценты и что поправить телом.",
+      avoid:
+        "Не используй в текстовых комментариях проценты, цифры, сухую статистику, названия внутренних метрик, HTTP/API детали и технические слова про расчеты.",
+      numericFields:
+        "Числовые оценки возвращай только в отдельных JSON-полях score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore и worstScore."
+    },
     localBaseline: {
       method: local.method,
       score: local.score,
@@ -642,7 +652,7 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
       user: compactScanForAi(rightScan)
     },
     expectedOutput:
-      "Верни JSON: score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore, worstScore, verdict, reasoning, suggestions."
+      "Верни JSON: score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore, worstScore, verdict, reasoning, suggestions. В score-полях оставь числа, но verdict, reasoning и suggestions напиши как живой комментарий хореографа без процентов, цифр, статистики и внутренних названий метрик."
   };
 }
 
@@ -4046,12 +4056,6 @@ function App() {
                 <>
                   <p>{comparison.verdict}</p>
                   {comparison.diagnostics?.openAiReasoning && <p>{comparison.diagnostics.openAiReasoning}</p>}
-                  <div className="ai-score-list">
-                    <span>Итог: <b>{comparison.score}%</b></span>
-                    <span>Хореография: <b>{comparison.rows.find((row) => row.id === "openai-expert-choreography")?.score ?? "-"}%</b></span>
-                    <span>Скан: <b>{comparison.diagnostics?.openAiTrackingQualityScore ?? "-"}%</b></span>
-                    <span>Уверенность: <b>{comparison.diagnostics?.openAiConfidence ?? "-"}%</b></span>
-                  </div>
                   {comparison.suggestions?.length > 0 && (
                     <div>
                       <strong>Что исправить:</strong>
