@@ -988,11 +988,46 @@ h3 {
   padding: 16px;
 }
 
+.ai-commentary {
+  border: 1px solid #dbe4ef;
+  border-left: 4px solid #0f6fdd;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.ai-commentary.ready {
+  background: #f5fbff;
+}
+
+.ai-commentary.error {
+  background: #fff6f4;
+  border-left-color: #f04438;
+}
+
 .verdict p,
-.suggestions p {
+.suggestions p,
+.ai-commentary p {
   color: #3f5062;
   line-height: 1.55;
   margin-bottom: 0;
+}
+
+.ai-score-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-score-list span {
+  background: #ffffff;
+  border: 1px solid #dbe4ef;
+  border-radius: 999px;
+  color: #52677c;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 7px 10px;
 }
 
 .worst-moment {

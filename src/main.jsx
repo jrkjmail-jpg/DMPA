@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.1",
-  versionLabel: "v0.5.1",
-  build: "openai-expert-diagnostics-2026-07-13"
+  version: "0.5.2",
+  versionLabel: "v0.5.2",
+  build: "openai-expert-commentary-2026-07-13"
 };
 
 const modelUrls = {
@@ -3731,7 +3731,10 @@ function App() {
         openAiModel: result.diagnostics?.openAiModel ?? null,
         openAiConfidence: result.diagnostics?.openAiConfidence ?? null,
         openAiTrackingQualityScore: result.diagnostics?.openAiTrackingQualityScore ?? null,
-        openAiError: result.diagnostics?.openAiError ?? null
+        openAiError: result.diagnostics?.openAiError ?? null,
+        openAiReasoning: result.diagnostics?.openAiReasoning ?? null,
+        openAiVerdict: result.diagnostics?.openAiReady ? result.verdict : null,
+        openAiSuggestions: result.diagnostics?.openAiReady ? result.suggestions || [] : []
       },
       angleRows: sampleEvenly(result.rows || [], maxStoredAngleRows),
       skeletons: {
@@ -4005,6 +4008,37 @@ function App() {
               </p>
             )}
           </div>
+
+          {comparisonModel === "openai-expert" && (
+            <div className={`ai-commentary ${comparison.diagnostics?.openAiReady ? "ready" : "error"}`}>
+              <div>
+                <p className="eyebrow">Ответ OpenAI эксперта</p>
+                <h3>{comparison.diagnostics?.openAiReady ? "AI-комментарий по исполнению" : "OpenAI пока не ответил"}</h3>
+              </div>
+              {comparison.diagnostics?.openAiReady ? (
+                <>
+                  <p>{comparison.verdict}</p>
+                  {comparison.diagnostics?.openAiReasoning && <p>{comparison.diagnostics.openAiReasoning}</p>}
+                  <div className="ai-score-list">
+                    <span>Итог: <b>{comparison.score}%</b></span>
+                    <span>Хореография: <b>{comparison.rows.find((row) => row.id === "openai-expert-choreography")?.score ?? "-"}%</b></span>
+                    <span>Скан: <b>{comparison.diagnostics?.openAiTrackingQualityScore ?? "-"}%</b></span>
+                    <span>Уверенность: <b>{comparison.diagnostics?.openAiConfidence ?? "-"}%</b></span>
+                  </div>
+                  {comparison.suggestions?.length > 0 && (
+                    <div>
+                      <strong>Что исправить:</strong>
+                      {comparison.suggestions.slice(0, 5).map((item) => (
+                        <p key={item}>{item}</p>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p>{comparison.diagnostics?.openAiError || "Запустите полный анализ и проверьте OPENAI_API_KEY в Cloudflare."}</p>
+              )}
+            </div>
+          )}
 
           <div className="angle-table">
             <div className="table-head">
