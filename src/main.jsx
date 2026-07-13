@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.8",
-  versionLabel: "v0.5.8",
-  build: "openai-choreography-events-2026-07-13"
+  version: "0.5.9",
+  versionLabel: "v0.5.9",
+  build: "openai-evidence-gate-2026-07-14"
 };
 
 const modelUrls = {
@@ -148,14 +148,14 @@ const comparisonModels = {
   },
   "openai-expert": {
     id: "openai-expert",
-    version: "0.6.0",
-    versionLabel: "v0.6.0",
-    algorithmBuild: "openai-choreography-events-2026-07-13",
+    version: "0.7.0",
+    versionLabel: "v0.7.0",
+    algorithmBuild: "openai-evidence-gate-2026-07-14",
     name: "OpenAI эксперт",
     title: "OpenAI эксперт",
     shortTitle: "8. OpenAI эксперт",
     description:
-      "Серверная AI-модель: сравнивает последовательность хореографических действий, а мелкие недотяги, смаз и небольшую фазовую разницу считает мягкими замечаниями."
+      "Серверная AI-модель: требует доказательство выполнения хореографической фразы, отделяет качество скана от качества танца и строго ограничивает оценку при отсутствии движения."
   }
 };
 
@@ -555,7 +555,7 @@ async function compareScansOpenAiExpert(leftScan, rightScan, sync, regions, left
       verdict: `OpenAI эксперт недоступен, показана локальная оценка ${local.score}%. Причина: ${detail}`
     };
   }
-  const aiScore = clampPercent(data.score ?? data.finalScore ?? local.score);
+  const aiScore = clampPercent(data.finalDisplayedScore ?? data.score ?? data.finalScore ?? local.score);
   const rows = [
     rowPercent("openai-expert-score", "OpenAI эксперт: итоговая оценка", aiScore),
     rowPercent("openai-expert-choreography", "OpenAI эксперт: хореография", data.choreographyScore ?? aiScore),
@@ -579,7 +579,9 @@ async function compareScansOpenAiExpert(leftScan, rightScan, sync, regions, left
       openAiModel: data.openAiModel || "server-default",
       openAiConfidence: clampPercent(data.confidence ?? 70),
       openAiTrackingQualityScore: clampPercent(data.trackingQualityScore ?? 100),
-      openAiReasoning: data.reasoning || ""
+      openAiReasoning: data.reasoning || "",
+      openAiEvidenceGateApplied: Boolean(data.evidenceGateApplied),
+      openAiEvidenceGateReason: data.evidenceGateReason || ""
     },
     verdict: data.verdict || "OpenAI эксперт видит, что ученик в целом повторяет эталон, но отдельные моменты стоит разобрать внимательнее.",
     bestScore: clampPercent(data.bestScore ?? local.bestScore),
@@ -600,6 +602,33 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
         "Сначала смотри на всю композицию и крупные фрагменты движения: начало, развитие, акценты и финал. Не делай главный вывод по одному кадру или одной позе.",
       choreographyEvents:
         "Сравнивай танец как цепочку понятных действий: ноги раскрылись или закрылись, руки поднялись или опустились, руки сделали круг, корпус повернулся, вес перенесся, прыжок или шаг случился, акцент был пойман. Если действие совпало по смыслу и месту в музыке, это важнее мелкой разницы в точке кисти или локтя.",
+      evidenceRule:
+        "Высокая оценка возможна только если есть доказательство выполнения хореографической фразы. Стабильный корпус, хороший ритм, надежный trackingQualityScore или похожая средняя поза сами по себе не доказывают, что ученик станцевал связку.",
+      scoreSeparation: {
+        choreographyScore:
+          "Оценивает только то, насколько ученик выполнил ту же хореографию, последовательность действий, акценты и направления.",
+        trackingQualityScore:
+          "Оценивает только надежность скана MediaPipe. Это не бонус к хореографии.",
+        finalDisplayedScore:
+          "Клиентская оценка ученика после evidence gate. trackingQualityScore никогда не должен повышать choreographyScore."
+      },
+      evidenceGate: [
+        "Если амплитуда движения ученика почти отсутствует относительно эталона, finalDisplayedScore не выше 15.",
+        "Если trajectoryScore < 45 и keyPoseScore < 70, finalDisplayedScore не выше 40.",
+        "Если trajectoryScore < 45, frameHitScore < 72 и anglePatternScore < 70, finalDisplayedScore не выше 45.",
+        "Если ученик стоит или делает только минимальные движения, не называй это упрощенной версией той же связки. Пиши: хореографическая фраза в основном не выполнена.",
+        "Если движение есть, но последовательность, направления корпуса, рук и акценты отличаются, не оценивай выше 40-50, даже если ритм частично похож.",
+        "Если ученик действительно повторяет ту же фразу, но с человеческими отличиями, можно давать 80-95.",
+        "Если ученик хорошо повторяет эталон, но скан частично плохой, choreographyScore может быть высоким, но добавь предупреждение о trackingQuality."
+      ],
+      negativeCases: [
+        "Человек стоит: 0-15.",
+        "Другая хореография: 0-40.",
+        "Движение частично похоже, но фраза распадается: 40-60.",
+        "Та же фраза, но слабая амплитуда, руки или акценты: 60-80.",
+        "Хорошее повторение: 80-95.",
+        "Почти идеальное повторение другим человеком: 90-100."
+      ],
       segmentLogic: [
         "Оцени, повторяется ли общий рисунок танца от начала до конца.",
         "Сначала найди совпадающие хореографические события: ноги в стороны, руки вверх, круг руками, поворот, шаг, присед, акцент.",
@@ -640,7 +669,7 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
         "быстрые движения как траекторию, а не только как замороженную позу в одном кадре"
       ],
       warning:
-        "Если локальная метрика резко снижена из-за trajectory/микрошумов, смаза быстрых рук, небольшого фазового сдвига или мелкой разницы кисти/локтя, но цепочка действий совпала с эталоном, итоговую оценку нужно делать ближе к человеческой визуальной оценке, а не к шумной метрике."
+        "Если локальная метрика резко снижена из-за trajectory/микрошумов, смаза быстрых рук, небольшого фазового сдвига или мелкой разницы кисти/локтя, но цепочка действий совпала с эталоном, итоговую оценку нужно делать ближе к человеческой визуальной оценке. Но если доказательства выполнения фразы нет, высокий trackingQualityScore, стабильный корпус или похожая средняя поза не должны поднимать оценку."
     },
     commentStyle: {
       goal:
@@ -652,7 +681,7 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
       allowed:
         "Можно указать примерное время ошибки, если это помогает ученику найти место в видео. Время должно быть педагогической подсказкой, а не статистикой.",
       numericFields:
-        "Числовые оценки возвращай только в отдельных JSON-полях score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore и worstScore."
+        "Числовые оценки возвращай только в отдельных JSON-полях choreographyScore, trackingQualityScore, finalDisplayedScore, confidence, bestScore и worstScore."
     },
     localBaseline: {
       method: local.method,
@@ -676,7 +705,7 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
       user: compactScanForAi(rightScan)
     },
     expectedOutput:
-      "Верни JSON: score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore, worstScore, verdict, reasoning, suggestions. В score-полях оставь числа. verdict, reasoning и suggestions напиши простым языком хореографа для ученика: сначала вывод по всей фразе, потом 1-3 понятные правки. Не цепляйся за одиночный кадр. Не используй проценты, статистику и внутренние названия метрик. Можно назвать примерную секунду, если это помогает найти ошибку."
+      "Верни JSON: choreographyScore, trackingQualityScore, finalDisplayedScore, evidenceGateApplied, evidenceGateReason, confidence, bestScore, worstScore, verdict, reasoning, suggestions. В score-полях оставь числа. verdict, reasoning и suggestions напиши простым языком хореографа для ученика: честно скажи, выполнена ли хореографическая фраза. Не начисляй похожесть за стабильное стояние. Не используй проценты, статистику и внутренние названия метрик. Можно назвать примерную секунду, если это помогает найти ошибку."
   };
 }
 
@@ -3792,6 +3821,8 @@ function App() {
         openAiModel: result.diagnostics?.openAiModel ?? null,
         openAiConfidence: result.diagnostics?.openAiConfidence ?? null,
         openAiTrackingQualityScore: result.diagnostics?.openAiTrackingQualityScore ?? null,
+        openAiEvidenceGateApplied: result.diagnostics?.openAiEvidenceGateApplied ?? null,
+        openAiEvidenceGateReason: result.diagnostics?.openAiEvidenceGateReason ?? null,
         openAiError: result.diagnostics?.openAiError ?? null,
         openAiReasoning: result.diagnostics?.openAiReasoning ?? null,
         openAiVerdict: result.diagnostics?.openAiReady ? result.verdict : null,
@@ -4042,6 +4073,10 @@ function App() {
                       : "-"
                   }
                 />
+                <MetricCard
+                  label="Evidence gate"
+                  value={comparison.diagnostics?.openAiEvidenceGateApplied ? "сработал" : "не сработал"}
+                />
                 {comparison.diagnostics?.openAiError && <MetricCard label="Ошибка OpenAI" value={comparison.diagnostics.openAiError} />}
               </>
             )}
@@ -4080,6 +4115,9 @@ function App() {
                 <>
                   <p>{comparison.verdict}</p>
                   {comparison.diagnostics?.openAiReasoning && <p>{comparison.diagnostics.openAiReasoning}</p>}
+                  {comparison.diagnostics?.openAiEvidenceGateApplied && comparison.diagnostics?.openAiEvidenceGateReason && (
+                    <p>{comparison.diagnostics.openAiEvidenceGateReason}</p>
+                  )}
                   {comparison.suggestions?.length > 0 && (
                     <div>
                       <strong>Что исправить:</strong>

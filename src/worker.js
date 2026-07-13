@@ -52,7 +52,7 @@ async function handleOpenAiCompare(request, env) {
           {
             role: "developer",
             content:
-              "Ты эксперт-хореограф по анализу танцевальных скелетов. Оцени правое видео ученика относительно левого эталона так, как оценивал бы внимательный педагог по видео. Главный принцип: сначала смотри на всю хореографическую фразу и крупные фрагменты композиции, потом на цепочку хореографических действий, потом на повторяемые ошибки, и только в конце на отдельные позы. Сравнивай события танца: ноги раскрылись или закрылись, руки поднялись или опустились, руки сделали круг, корпус повернулся, вес перенесся, шаг или прыжок случился, акцент был пойман. Если ученик сделал то же действие в той же части музыки, это важнее мелкой разницы в кисти, локте или одном смазанном кадре. Не делай итоговый вывод по одному кадру. Если два видео показывают одну и ту же хореографию с небольшими отличиями камеры, роста, амплитуды или исполнения, оценка должна быть высокой. Разделяй качество хореографии и качество трекинга. Игнорируй как ошибку ученика микродрожание точек, одиночные сломанные кадры, улетевшие суставы, невозможные скачки конечностей и короткие потери тела, если соседние кадры подтверждают нормальное движение. Быстрые руки и ноги оцени по траектории и фазе движения, а не по одному замороженному кадру: если одна запись поймала руку в пике, а другая из-за смаза или FPS поймала соседнюю фазу того же движения, это мягкий допуск, а не грубая ошибка. Небольшое опережение или отставание конечности внутри той же музыкальной фразы тоже не считай серьезной ошибкой, если корпус, направление, траектория и акцент совпадают. Такие случаи учитывай только в trackingQualityScore, но в текстовом комментарии не превращай их в сухую статистику. Не штрафуй за рост, комплекцию, длину конечностей, небольшую разницу камеры или масштаб. Допускай мягкое опережение/отставание рук и ног на 1-2 кадра. Главная оценка должна отражать устойчивую хореографическую фразу, последовательность действий, корпус, ритм, амплитуду, направление движения и ключевые акценты. Не завышай разные танцы и стоящего человека против танца. Числовые поля JSON заполняй числами, но verdict, reasoning и suggestions пиши простым языком хореографа для ребенка или начинающего ученика: коротко, понятно, без сложных метафор, без процентов, без сухой статистики, без внутренних названий метрик, без HTTP/API деталей и технических терминов. Можно указать примерное время ошибки, если это помогает найти место в видео, например когда рука, локоть, корпус, нога или акцент заметно уходят от эталона. Отвечай только валидным JSON без markdown."
+              "Ты эксперт-хореограф и аналитик движения DMPA. Левое видео всегда эталон педагога, правое видео всегда попытка ученика. Оцени, действительно ли правое видео повторяет хореографическую фразу левого эталона. Не сравнивай пиксельное совпадение тел. Оценивай последовательность движений, акценты, направления, амплитуду, корпус, руки, ноги и музыкальный тайминг. Разные рост, камера, комплекция и длина конечностей не должны сильно штрафоваться. Небольшое запаздывание рук или ног на 1-2 кадра не должно сильно штрафоваться. Плохой MediaPipe-скан относится к trackingQualityScore, а не автоматически к ошибке ученика. Главное правило: высокая оценка возможна только если есть доказательство выполнения хореографической фразы. Стабильный корпус, хороший ритм, хороший trackingQualityScore или похожая средняя поза не являются достаточным доказательством. Разделяй choreographyScore, trackingQualityScore и finalDisplayedScore. trackingQualityScore никогда не должен повышать choreographyScore. Если trackingQualityScore высокий, но движения мало или фраза не повторяется, это значит: мы уверены, что ученик не выполнил фразу. Перед финальной оценкой применяй evidence gate: если амплитуда движения ученика почти отсутствует относительно эталона, finalDisplayedScore не выше 15; если trajectoryScore < 45 и keyPoseScore < 70, finalDisplayedScore не выше 40; если trajectoryScore < 45, frameHitScore < 72 и anglePatternScore < 70, finalDisplayedScore не выше 45; если ученик стоит или делает минимальные движения, не называй это упрощенной версией той же связки, скажи, что хореографическая фраза в основном не выполнена; если движение есть, но последовательность, направления корпуса, рук и акценты отличаются, не оценивай выше 40-50; если ученик действительно повторяет ту же фразу с человеческими отличиями, можно давать 80-95; если повторение хорошее, но скан частично плохой, choreographyScore может быть высоким, но добавь предупреждение о trackingQuality. Оценивай отрицательные кейсы строго: человек стоит 0-15, другая хореография 0-40, частично похожее движение с распадающейся фразой 40-60, та же фраза со слабой амплитудой или акцентами 60-80, хорошее повторение 80-95, почти идеальное повторение другим человеком 90-100. Числовые поля JSON заполняй числами. verdict и suggestions пиши как честный педагог простым языком, без процентов, сухой статистики, внутренних названий метрик, HTTP/API деталей и сложных метафор. Если ученик почти не двигался, прямо скажи, что фраза не выполнена. Верни только валидный JSON без markdown с полями choreographyScore, trackingQualityScore, finalDisplayedScore, evidenceGateApplied, evidenceGateReason, verdict, suggestions."
           },
           {
             role: "user",
@@ -91,13 +91,16 @@ async function handleOpenAiCompare(request, env) {
     return json({
       ready: true,
       openAiModel: env.OPENAI_MODEL || defaultModel,
-      score: clampPercent(parsed.score ?? parsed.finalScore),
-      choreographyScore: clampPercent(parsed.choreographyScore ?? parsed.score),
+      score: clampPercent(parsed.finalDisplayedScore ?? parsed.score ?? parsed.finalScore),
+      finalDisplayedScore: clampPercent(parsed.finalDisplayedScore ?? parsed.score ?? parsed.finalScore),
+      choreographyScore: clampPercent(parsed.choreographyScore ?? parsed.finalDisplayedScore ?? parsed.score),
       trackingQualityScore: clampPercent(parsed.trackingQualityScore ?? 100),
       rhythmScore: clampPercent(parsed.rhythmScore ?? parsed.timingScore ?? parsed.score),
       confidence: clampPercent(parsed.confidence ?? 70),
-      bestScore: clampPercent(parsed.bestScore ?? parsed.score),
-      worstScore: clampPercent(parsed.worstScore ?? parsed.score),
+      bestScore: clampPercent(parsed.bestScore ?? parsed.finalDisplayedScore ?? parsed.score),
+      worstScore: clampPercent(parsed.worstScore ?? parsed.finalDisplayedScore ?? parsed.score),
+      evidenceGateApplied: Boolean(parsed.evidenceGateApplied),
+      evidenceGateReason: cleanCoachText(parsed.evidenceGateReason || ""),
       verdict: cleanCoachText(parsed.verdict || ""),
       reasoning: cleanCoachText(parsed.reasoning || ""),
       suggestions: Array.isArray(parsed.suggestions) ? parsed.suggestions.map(cleanCoachText).filter(Boolean).slice(0, 8) : []
@@ -117,7 +120,7 @@ function cleanCoachText(value) {
   return String(value || "")
     .replace(/\b\d+([.,]\d+)?\s*%/g, "")
     .replace(/\b\d+([.,]\d+)?\s*(кадр(?:а|ов)?|frames?|points?|балл(?:а|ов)?)/gi, "")
-    .replace(/\b(score|finalScore|choreographyScore|trackingQualityScore|rhythmScore|bestScore|worstScore|confidence|framesCompared|trajectoryScore|poseScore|motionScore|timingScore)\b/gi, "")
+    .replace(/\b(score|finalScore|finalDisplayedScore|choreographyScore|trackingQualityScore|rhythmScore|bestScore|worstScore|confidence|framesCompared|trajectoryScore|keyPoseScore|frameHitScore|anglePatternScore|poseScore|motionScore|timingScore|evidenceGateApplied|evidenceGateReason)\b/gi, "")
     .replace(/\b(HTTP|API|JSON|MediaPipe)\b/g, "")
     .replace(/\s{2,}/g, " ")
     .replace(/\s+([.,;:!?])/g, "$1")
