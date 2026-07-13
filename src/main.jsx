@@ -23,9 +23,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.5",
-  versionLabel: "v0.5.5",
-  build: "openai-human-commentary-2026-07-13"
+  version: "0.5.6",
+  versionLabel: "v0.5.6",
+  build: "openai-phrase-first-review-2026-07-13"
 };
 
 const modelUrls = {
@@ -148,14 +148,14 @@ const comparisonModels = {
   },
   "openai-expert": {
     id: "openai-expert",
-    version: "0.3.0",
-    versionLabel: "v0.3.0",
-    algorithmBuild: "openai-human-choreographer-commentary-2026-07-13",
+    version: "0.4.0",
+    versionLabel: "v0.4.0",
+    algorithmBuild: "openai-phrase-first-choreographer-2026-07-13",
     name: "OpenAI эксперт",
     title: "OpenAI эксперт",
     shortTitle: "8. OpenAI эксперт",
     description:
-      "Серверная AI-модель: оценивает танец как хореограф, игнорируя микродрожание и короткие сбои MediaPipe, а комментарий пишет живым педагогическим языком."
+      "Серверная AI-модель: сначала оценивает хореографическую фразу целиком, затем крупные фрагменты и только потом отдельные ошибки, а комментарий пишет простым языком педагога."
   }
 };
 
@@ -596,6 +596,15 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
     scoringPolicy: {
       primaryQuestion:
         "Насколько ученик визуально и хореографически повторяет эталонную фразу, как это оценил бы внимательный педагог.",
+      phraseFirst:
+        "Сначала смотри на всю композицию и крупные фрагменты движения: начало, развитие, акценты и финал. Не делай главный вывод по одному кадру или одной позе.",
+      segmentLogic: [
+        "Оцени, повторяется ли общий рисунок танца от начала до конца.",
+        "Смотри на устойчивые различия, которые держатся несколько моментов подряд.",
+        "Одиночную спорную позу учитывай только как маленькое замечание, если до и после движение похоже.",
+        "Если ученик танцует ту же хореографию, но немного иначе по камере, росту или амплитуде, оценка должна оставаться высокой.",
+        "Если ошибка видна в конкретном месте фразы, можно назвать примерное время, но не превращать комментарий в таблицу."
+      ],
       ignoreAsStudentErrors: [
         "микродрожание точек MediaPipe",
         "одиночные или короткие серии сломанных кадров",
@@ -611,6 +620,8 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
       ],
       compareAsHumanWould: [
         "общая хореографическая фраза",
+        "цельность композиции",
+        "повторяемость крупных фрагментов",
         "ритм и музыкальное попадание",
         "корпус как главный якорь",
         "амплитуда и направление движения",
@@ -622,11 +633,13 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
     },
     commentStyle: {
       goal:
-        "Текстовые поля verdict, reasoning и suggestions должны звучать как комментарий педагога-хореографа после просмотра ученика.",
+        "Текстовые поля verdict, reasoning и suggestions должны звучать как комментарий педагога-хореографа ребенку или начинающему ученику.",
       use:
-        "Пиши про ощущение движения, корпус, музыкальность, амплитуду, собранность формы, руки, ноги, акценты и что поправить телом.",
+        "Пиши коротко, просто и конкретно: что получилось, что поправить, где рука, локоть, корпус, нога или акцент уходят от эталона.",
       avoid:
-        "Не используй в текстовых комментариях проценты, цифры, сухую статистику, названия внутренних метрик, HTTP/API детали и технические слова про расчеты.",
+        "Не используй в текстовых комментариях проценты, сухую статистику, названия внутренних метрик, HTTP/API детали, технические слова про расчеты и сложные метафоры.",
+      allowed:
+        "Можно указать примерное время ошибки, если это помогает ученику найти место в видео. Время должно быть педагогической подсказкой, а не статистикой.",
       numericFields:
         "Числовые оценки возвращай только в отдельных JSON-полях score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore и worstScore."
     },
@@ -652,7 +665,7 @@ function buildOpenAiComparisonPayload({ leftScan, rightScan, sync, regions, left
       user: compactScanForAi(rightScan)
     },
     expectedOutput:
-      "Верни JSON: score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore, worstScore, verdict, reasoning, suggestions. В score-полях оставь числа, но verdict, reasoning и suggestions напиши как живой комментарий хореографа без процентов, цифр, статистики и внутренних названий метрик."
+      "Верни JSON: score, choreographyScore, trackingQualityScore, rhythmScore, confidence, bestScore, worstScore, verdict, reasoning, suggestions. В score-полях оставь числа. verdict, reasoning и suggestions напиши простым языком хореографа для ученика: сначала вывод по всей фразе, потом 1-3 понятные правки. Не цепляйся за одиночный кадр. Не используй проценты, статистику и внутренние названия метрик. Можно назвать примерную секунду, если это помогает найти ошибку."
   };
 }
 
