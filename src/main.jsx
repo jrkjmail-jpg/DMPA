@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.4",
-  versionLabel: "v0.6.4",
-  build: "zone-grid-comparison-2026-07-19"
+  version: "0.6.5",
+  versionLabel: "v0.6.5",
+  build: "split-zones-drawing-visualization-2026-07-19"
 };
 
 const captureEngines = {
@@ -176,9 +176,9 @@ const comparisonModels = {
   },
   "zones-drawing": {
     id: "zones-drawing",
-    version: "0.1.2",
-    versionLabel: "v0.1.2",
-    algorithmBuild: "joint-zones-trajectory-bone-normalized-visualized-2026-07-19",
+    version: "0.1.3",
+    versionLabel: "v0.1.3",
+    algorithmBuild: "joint-zones-trajectory-bone-normalized-split-visualization-2026-07-19",
     name: "Области + Рисунок",
     title: "Области + Рисунок",
     shortTitle: "9. Области + Рисунок",
@@ -4295,8 +4295,8 @@ function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hy
         </div>
       )}
       <p className="sync-note">
-        Круги показывают допустимые области вокруг суставов эталона. Линии показывают рисунок движения активных точек за короткий фрагмент
-        вокруг выбранного кадра. Правый скелет предварительно подгоняется по корпусу и длинам костей эталона.
+        Две панели показывают механику модели отдельно: слева эталон, справа правое видео. Круги показывают области вокруг суставов, а
+        линии показывают рисунок движения активных точек за короткий фрагмент вокруг выбранного кадра.
       </p>
     </section>
   );
@@ -4538,34 +4538,66 @@ function pointToZoneGridCanvas(point, rect) {
 }
 
 function drawZonesDrawingScene(ctx, pair, trajectoryPairs, width, height, methods) {
-  const left = pair.fitted.left;
-  const right = pair.fitted.right;
-  const project = normalizedSkeletonProjector(width, height);
-  if (methods.zones) drawJointZones(ctx, left, right, project);
-  if (methods.drawing) drawJointTrajectories(ctx, trajectoryPairs, project);
-  drawSkeletonDifferences(ctx, left, right, width, height, { arms: true, torso: true, legs: true });
-  drawNormalizedSkeleton(ctx, left, width, height, "#28d7a4", { arms: true, torso: true, legs: true });
-  drawNormalizedSkeleton(ctx, right, width, height, "#55a4ff", { arms: true, torso: true, legs: true });
+  const gap = 18;
+  const top = 44;
+  const panelWidth = (width - gap * 3) / 2;
+  const panelHeight = height - top - 18;
+  const leftRect = { x: gap, y: top, width: panelWidth, height: panelHeight };
+  const rightRect = { x: gap * 2 + panelWidth, y: top, width: panelWidth, height: panelHeight };
+
+  drawZonesDrawingPanel(ctx, leftRect, "Эталон", pair.fitted.left, pair.fitted.right, trajectoryPairs, methods, "left");
+  drawZonesDrawingPanel(ctx, rightRect, "Правое видео", pair.fitted.right, pair.fitted.left, trajectoryPairs, methods, "right");
 }
 
-function normalizedSkeletonProjector(width, height) {
-  const centerX = width / 2;
-  const centerY = height * 0.52;
-  const scale = Math.min(width, height) * 0.22;
+function drawZonesDrawingPanel(ctx, rect, title, landmarks, oppositeLandmarks, trajectoryPairs, methods, side) {
+  ctx.save();
+  ctx.strokeStyle = "rgba(216, 232, 250, 0.18)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  drawPanelSkeletonGrid(ctx, rect);
+  const project = panelSkeletonProjector(rect);
+  if (methods.zones) drawJointZones(ctx, landmarks, oppositeLandmarks, project);
+  if (methods.drawing) drawJointTrajectories(ctx, trajectoryPairs, project, side);
+  drawSkeletonInPanel(ctx, landmarks, rect, side === "left" ? "#28d7a4" : "#55a4ff");
+  ctx.fillStyle = "#d8e8fa";
+  ctx.font = "800 13px Inter, sans-serif";
+  ctx.fillText(title, rect.x + 12, rect.y + 22);
+  ctx.restore();
+}
+
+function drawPanelSkeletonGrid(ctx, rect) {
+  ctx.strokeStyle = "rgba(216, 232, 250, 0.12)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i += 1) {
+    const x = rect.x + (rect.width / 4) * i;
+    const y = rect.y + (rect.height / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(x, rect.y);
+    ctx.lineTo(x, rect.y + rect.height);
+    ctx.moveTo(rect.x, y);
+    ctx.lineTo(rect.x + rect.width, y);
+    ctx.stroke();
+  }
+}
+
+function panelSkeletonProjector(rect) {
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height * 0.54;
+  const scale = Math.min(rect.width, rect.height) * 0.26;
   return {
     scale,
     point: (point) => ({ x: centerX + point.x * scale, y: centerY + point.y * scale })
   };
 }
 
-function drawJointZones(ctx, leftLandmarks, rightLandmarks, project) {
+function drawJointZones(ctx, landmarks, oppositeLandmarks, project) {
   for (const spec of zoneDrawingJointSpecs) {
-    const leftPoint = leftLandmarks?.[spec.id];
-    if (!leftPoint) continue;
-    const center = project.point(leftPoint);
-    const rightPoint = rightLandmarks?.[spec.id] ? project.point(rightLandmarks[spec.id]) : null;
+    const point = landmarks?.[spec.id];
+    if (!point) continue;
+    const center = project.point(point);
+    const oppositePoint = oppositeLandmarks?.[spec.id] ? project.point(oppositeLandmarks[spec.id]) : null;
     const radius = spec.radius * project.scale;
-    const hit = rightPoint ? Math.hypot(center.x - rightPoint.x, center.y - rightPoint.y) <= radius : false;
+    const hit = oppositePoint ? Math.hypot(center.x - oppositePoint.x, center.y - oppositePoint.y) <= radius : false;
 
     ctx.beginPath();
     ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
@@ -4577,12 +4609,35 @@ function drawJointZones(ctx, leftLandmarks, rightLandmarks, project) {
   }
 }
 
-function drawJointTrajectories(ctx, pairs, project) {
+function drawJointTrajectories(ctx, pairs, project, side = "left") {
   for (const spec of zoneDrawingJointSpecs) {
-    const leftPath = pairs.map((pair) => pair.fitted.left?.[spec.id]).filter(Boolean);
-    const rightPath = pairs.map((pair) => pair.fitted.right?.[spec.id]).filter(Boolean);
-    drawTrajectoryPath(ctx, leftPath, project, "rgba(40, 215, 164, 0.72)");
-    drawTrajectoryPath(ctx, rightPath, project, "rgba(85, 164, 255, 0.72)");
+    const path = pairs.map((pair) => pair.fitted[side]?.[spec.id]).filter(Boolean);
+    drawTrajectoryPath(ctx, path, project, side === "left" ? "rgba(40, 215, 164, 0.72)" : "rgba(85, 164, 255, 0.72)");
+  }
+}
+
+function drawSkeletonInPanel(ctx, landmarks, rect, color) {
+  if (!landmarks?.length) return;
+  const ids = new Set(zoneDrawingJointSpecs.map((spec) => spec.id).concat([11, 12, 23, 24]));
+  const project = panelSkeletonProjector(rect).point;
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+  for (const [a, b] of poseConnections) {
+    if (!ids.has(a) || !ids.has(b) || !landmarks[a] || !landmarks[b]) continue;
+    const pa = project(landmarks[a]);
+    const pb = project(landmarks[b]);
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+  }
+  for (const id of ids) {
+    if (!landmarks[id]) continue;
+    const point = project(landmarks[id]);
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, zoneDrawingJointSpecs.some((spec) => spec.id === id) ? 4 : 2.6, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
