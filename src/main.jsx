@@ -18,14 +18,30 @@ import "./styles.css";
 const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm";
 const labHistoryKey = "dmpa.lab.history.v1";
 const mediaPipeSettingsKey = "dmpa.mediapipe.settings.v1";
+const captureEngineKey = "dmpa.capture.engine.v1";
 const maxStoredLabItems = 20;
 const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.5.9",
-  versionLabel: "v0.5.9",
-  build: "openai-evidence-gate-2026-07-14"
+  version: "0.6.0",
+  versionLabel: "v0.6.0",
+  build: "motioncap-lab-freemocap-import-2026-07-18"
+};
+
+const captureEngines = {
+  mediapipe: {
+    id: "mediapipe",
+    title: "MediaPipe",
+    shortTitle: "MediaPipe",
+    description: "Быстрое браузерное сканирование 2D/псевдо-3D скелета прямо из видео или камеры."
+  },
+  motioncap: {
+    id: "motioncap",
+    title: "MotionCap / FreeMoCap",
+    shortTitle: "MotionCap",
+    description: "Импорт исследовательского 3D-скелета FreeMoCap: body_3d_xyz.csv или *_by_frame.csv."
+  }
 };
 
 const modelUrls = {
@@ -1434,6 +1450,230 @@ function loadMediaPipeSettings() {
   }
 }
 
+function loadCaptureEngine() {
+  try {
+    const saved = localStorage.getItem(captureEngineKey);
+    return captureEngines[saved] ? saved : "mediapipe";
+  } catch {
+    return "mediapipe";
+  }
+}
+
+function parseCsvText(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      row.push(cell.trim());
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") index += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function parseMotionCapCsv(text, fileName = "freemocap.csv") {
+  const rows = parseCsvText(text);
+  if (rows.length < 2) throw new Error("CSV пустой или без строк данных.");
+  const headers = rows[0].map((header) => header.trim());
+  const lowerHeaders = headers.map((header) => header.toLowerCase());
+  const isTidy = ["frame", "keypoint", "x", "y", "z"].every((name) => lowerHeaders.includes(name));
+  const frames = isTidy ? parseTidyMotionCapRows(headers, rows.slice(1)) : parseWideMotionCapRows(headers, rows.slice(1));
+  if (!frames.length) throw new Error("Не удалось найти 3D-точки FreeMoCap в CSV.");
+  const keypoints = new Set();
+  let validValues = 0;
+  for (const frame of frames) {
+    for (const [name, point] of Object.entries(frame.points)) {
+      keypoints.add(name);
+      if ([point.x, point.y, point.z].every(Number.isFinite)) validValues += 1;
+    }
+  }
+  const duration = frames.at(-1)?.time || frames.length / 30;
+  return {
+    ready: true,
+    source: "freemocap",
+    fileName,
+    format: isTidy ? "tidy by_frame.csv" : "wide body_3d_xyz.csv",
+    frames,
+    duration,
+    frameCount: frames.length,
+    keypointCount: keypoints.size,
+    validValues,
+    keypoints: Array.from(keypoints).sort()
+  };
+}
+
+function parseTidyMotionCapRows(headers, rows) {
+  const index = Object.fromEntries(headers.map((header, idx) => [header.toLowerCase(), idx]));
+  const byFrame = new Map();
+  for (const row of rows) {
+    const frameNumber = Number(row[index.frame]);
+    const keypoint = String(row[index.keypoint] || "").trim();
+    if (!Number.isFinite(frameNumber) || !keypoint) continue;
+    const frame = byFrame.get(frameNumber) || {
+      frame: frameNumber,
+      time: Number.isFinite(Number(row[index.timestamp])) ? Number(row[index.timestamp]) : frameNumber / 30,
+      points: {},
+      reprojectionErrors: {}
+    };
+    frame.points[keypoint] = {
+      x: parseMotionCapNumber(row[index.x]),
+      y: parseMotionCapNumber(row[index.y]),
+      z: parseMotionCapNumber(row[index.z])
+    };
+    if (index.reprojection_error !== undefined) {
+      frame.reprojectionErrors[keypoint] = parseMotionCapNumber(row[index.reprojection_error]);
+    }
+    byFrame.set(frameNumber, frame);
+  }
+  return Array.from(byFrame.values()).sort((a, b) => a.frame - b.frame);
+}
+
+function parseWideMotionCapRows(headers, rows) {
+  const groups = new Map();
+  headers.forEach((header, index) => {
+    const match = header.match(/^(.+)_([xyz])$/i);
+    if (!match) return;
+    const pointName = match[1];
+    const axis = match[2].toLowerCase();
+    groups.set(pointName, { ...(groups.get(pointName) || {}), [axis]: index });
+  });
+  const timestampIndex = headers.findIndex((header) => header.toLowerCase() === "timestamp");
+  return rows
+    .map((row, frameIndex) => {
+      const points = {};
+      for (const [name, axes] of groups.entries()) {
+        if (axes.x === undefined || axes.y === undefined || axes.z === undefined) continue;
+        points[name] = {
+          x: parseMotionCapNumber(row[axes.x]),
+          y: parseMotionCapNumber(row[axes.y]),
+          z: parseMotionCapNumber(row[axes.z])
+        };
+      }
+      return {
+        frame: frameIndex,
+        time: timestampIndex >= 0 && Number.isFinite(Number(row[timestampIndex])) ? Number(row[timestampIndex]) : frameIndex / 30,
+        points
+      };
+    })
+    .filter((frame) => Object.keys(frame.points).length);
+}
+
+function parseMotionCapNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function compareMotionCapScans(reference, user) {
+  if (!reference?.frames?.length || !user?.frames?.length) {
+    return {
+      ready: false,
+      score: 0,
+      sharedKeypoints: 0,
+      framesCompared: 0,
+      verdict: "Загрузите FreeMoCap CSV для эталона и ученика."
+    };
+  }
+  const shared = reference.keypoints.filter((name) => user.keypoints.includes(name));
+  const useful = shared.filter((name) => !name.startsWith("com_"));
+  const sharedKeypoints = useful.length ? useful : shared;
+  const framesCompared = Math.min(reference.frames.length, user.frames.length);
+  let sum = 0;
+  let count = 0;
+  for (let index = 0; index < framesCompared; index += 1) {
+    const left = normalizeMotionCapFrame(reference.frames[index], sharedKeypoints);
+    const right = normalizeMotionCapFrame(user.frames[index], sharedKeypoints);
+    if (!left || !right) continue;
+    for (const name of sharedKeypoints) {
+      const a = left[name];
+      const b = right[name];
+      if (!a || !b) continue;
+      const distance = Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+      sum += Math.max(0, 1 - distance / 1.4);
+      count += 1;
+    }
+  }
+  const score = count ? clampPercent((sum / count) * 100) : 0;
+  return {
+    ready: count > 0,
+    score,
+    sharedKeypoints: sharedKeypoints.length,
+    framesCompared,
+    verdict:
+      score >= 85
+        ? "MotionCap 3D-скелеты очень близки по общей форме движения."
+        : score >= 65
+          ? "MotionCap видит похожую фразу, но есть заметные расхождения в 3D-траектории."
+          : "MotionCap не видит устойчивого совпадения 3D-скелетов."
+  };
+}
+
+function normalizeMotionCapFrame(frame, keypoints) {
+  const points = frame?.points || {};
+  const leftHip = points.left_hip;
+  const rightHip = points.right_hip;
+  const leftShoulder = points.left_shoulder;
+  const rightShoulder = points.right_shoulder;
+  const pelvis = midpoint3d(leftHip, rightHip) || points.hip || points.pelvis || points.com_full_body;
+  const neck = midpoint3d(leftShoulder, rightShoulder) || points.neck;
+  if (!pelvis) return null;
+  const scale = Math.max(0.001, distance3d(pelvis, neck) || averageMotionCapSpan(points, keypoints) || 1);
+  return Object.fromEntries(
+    keypoints
+      .map((name) => {
+        const point = points[name];
+        if (!point || ![point.x, point.y, point.z].every(Number.isFinite)) return null;
+        return [
+          name,
+          {
+            x: (point.x - pelvis.x) / scale,
+            y: (point.y - pelvis.y) / scale,
+            z: (point.z - pelvis.z) / scale
+          }
+        ];
+      })
+      .filter(Boolean)
+  );
+}
+
+function midpoint3d(a, b) {
+  if (!a || !b || ![a.x, a.y, a.z, b.x, b.y, b.z].every(Number.isFinite)) return null;
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+}
+
+function distance3d(a, b) {
+  if (!a || !b || ![a.x, a.y, a.z, b.x, b.y, b.z].every(Number.isFinite)) return 0;
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+function averageMotionCapSpan(points, keypoints) {
+  const valid = keypoints.map((name) => points[name]).filter((point) => point && [point.x, point.y, point.z].every(Number.isFinite));
+  if (valid.length < 2) return 1;
+  const center = valid.reduce((sum, point) => ({ x: sum.x + point.x, y: sum.y + point.y, z: sum.z + point.z }), { x: 0, y: 0, z: 0 });
+  center.x /= valid.length;
+  center.y /= valid.length;
+  center.z /= valid.length;
+  return valid.reduce((sum, point) => sum + distance3d(point, center), 0) / valid.length || 1;
+}
+
 function detectorOptions(settings, runningMode) {
   return {
     baseOptions: {
@@ -2339,6 +2579,108 @@ function MetricCard({ label, value }) {
     <div className="metric-card">
       <span>{label}</span>
       <strong>{value}</strong>
+    </div>
+  );
+}
+
+function TrackingEnginePanel({ engine, onChange }) {
+  return (
+    <section className="settings-panel engine-panel">
+      <div className="settings-title">
+        <div>
+          <p className="eyebrow">Движок сканирования</p>
+          <h2>Выбор источника скелета</h2>
+        </div>
+        <span className="status status-good">{captureEngines[engine].title}</span>
+      </div>
+      <div className="engine-switch">
+        {Object.values(captureEngines).map((item) => (
+          <button
+            type="button"
+            key={item.id}
+            className={engine === item.id ? "model-card active" : "model-card"}
+            onClick={() => onChange(item.id)}
+          >
+            <strong>{item.shortTitle}</strong>
+            <span>{item.description}</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function MotionCapLab({ leftScan, rightScan, status, onImport, comparison }) {
+  return (
+    <>
+      <section className="settings-panel motioncap-panel">
+        <div className="settings-title">
+          <div>
+            <p className="eyebrow">MotionCap Lab</p>
+            <h2>FreeMoCap 3D-скелет</h2>
+          </div>
+          <span className="status status-good">CSV импорт</span>
+        </div>
+        <p className="motioncap-intro">
+          FreeMoCap запускается как отдельная Python/desktop-система: записывает одну или несколько камер, синхронизирует видео,
+          строит 2D-точки через SkellyTracker, триангулирует 3D через Anipose и сохраняет скелет в `output_data`.
+          В DMPA сейчас можно загрузить экспорт `mediapipe_body_3d_xyz.csv` или `*_by_frame.csv` и сравнить 3D-скелеты.
+        </p>
+        <div className="motioncap-grid">
+          <MotionCapImportCard title="Эталон FreeMoCap" scan={leftScan} side="left" onImport={onImport} />
+          <MotionCapImportCard title="Ученик FreeMoCap" scan={rightScan} side="right" onImport={onImport} />
+        </div>
+        {status && <p className="motioncap-status">{status}</p>}
+      </section>
+
+      <section className="analysis-panel motioncap-analysis">
+        <div className="score-ring" style={{ "--score": comparison.score }}>
+          <div>
+            <span>{comparison.score}%</span>
+            <small>3D схожесть</small>
+          </div>
+        </div>
+        <div className="analysis-body">
+          <div className="metrics">
+            <MetricCard label="Статус MotionCap" value={comparison.ready ? "готов" : "ожидание"} />
+            <MetricCard label="Общих 3D-точек" value={comparison.sharedKeypoints || "-"} />
+            <MetricCard label="Кадров сравнено" value={comparison.framesCompared || "-"} />
+            <MetricCard label="Формат эталона" value={leftScan?.format || "-"} />
+            <MetricCard label="Формат ученика" value={rightScan?.format || "-"} />
+          </div>
+          <div className="verdict">
+            <h2>Анализ FreeMoCap относительно эталона</h2>
+            <p>{comparison.verdict}</p>
+          </div>
+          <div className="suggestions">
+            <h3>Как использовать дальше</h3>
+            <p>Сначала прогоняем видео через FreeMoCap, затем импортируем CSV сюда и сравниваем уже не плоский MediaPipe-скелет, а 3D-траектории суставов.</p>
+            <p>Следующий шаг - связать этот 3D-скелет с нашими моделями “фраза / события / evidence gate”, чтобы оценка танца опиралась на объемное движение.</p>
+          </div>
+        </div>
+      </section>
+    </>
+  );
+}
+
+function MotionCapImportCard({ title, scan, side, onImport }) {
+  return (
+    <div className="motioncap-card">
+      <div>
+        <p className="eyebrow">{side === "left" ? "Левое / эталон" : "Правое / ученик"}</p>
+        <h3>{title}</h3>
+      </div>
+      <label className="button camera-primary">
+        <FileVideo size={18} />
+        Загрузить CSV
+        <input type="file" accept=".csv,text/csv" onChange={(event) => onImport(side, event.target.files?.[0] || null)} />
+      </label>
+      <div className="motioncap-card-stats">
+        <MetricCard label="Файл" value={scan?.fileName || "-"} />
+        <MetricCard label="Кадров" value={scan?.frameCount || "-"} />
+        <MetricCard label="3D-точек" value={scan?.keypointCount || "-"} />
+        <MetricCard label="Длительность" value={scan?.duration ? formatSeconds(scan.duration, 1) : "-"} />
+      </div>
     </div>
   );
 }
@@ -3453,6 +3795,10 @@ function drawSkeletonDifferences(ctx, leftLandmarks, rightLandmarks, width, heig
 }
 
 function App() {
+  const [captureEngine, setCaptureEngine] = useState(() => loadCaptureEngine());
+  const [motionCapLeftScan, setMotionCapLeftScan] = useState(null);
+  const [motionCapRightScan, setMotionCapRightScan] = useState(null);
+  const [motionCapStatus, setMotionCapStatus] = useState("");
   const [mediaPipeSettings, setMediaPipeSettings] = useState(() => loadMediaPipeSettings());
   const [comparisonModel, setComparisonModel] = useState(() => {
     const savedModel = localStorage.getItem(comparisonModelKey);
@@ -3481,6 +3827,10 @@ function App() {
   const [labHistory, setLabHistory] = useState(() => loadLabHistory());
   const activeSpecs = useMemo(() => activeAngleSpecs(mediaPipeSettings.regions), [mediaPipeSettings.regions]);
   const activeSync = useMemo(() => effectiveSync(sync, manualSync), [sync, manualSync]);
+  const motionCapComparison = useMemo(
+    () => compareMotionCapScans(motionCapLeftScan, motionCapRightScan),
+    [motionCapLeftScan, motionCapRightScan]
+  );
   const liveComparison = useMemo(() => {
     if (comparisonModel === "openai-expert") return pendingOpenAiComparison();
     if (comparisonModel === "overlay") return compareOverlayFrames(leftPose, rightPose, mediaPipeSettings.regions);
@@ -3524,6 +3874,34 @@ function App() {
       console.warn("Не удалось сохранить настройки MediaPipe.", err);
     }
   }, [mediaPipeSettings]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(captureEngineKey, captureEngine);
+    } catch (err) {
+      console.warn("Не удалось сохранить движок сканирования.", err);
+    }
+  }, [captureEngine]);
+
+  const importMotionCapCsv = useCallback((side, file) => {
+    if (!file) return;
+    setMotionCapStatus(`Читаю ${file.name}...`);
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const scan = parseMotionCapCsv(String(reader.result || ""), file.name);
+        if (side === "left") setMotionCapLeftScan(scan);
+        if (side === "right") setMotionCapRightScan(scan);
+        setMotionCapStatus(`${file.name}: импортировано ${scan.frameCount} кадров и ${scan.keypointCount} 3D-точек.`);
+      } catch (err) {
+        setMotionCapStatus(`Не удалось импортировать ${file.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    reader.onerror = () => {
+      setMotionCapStatus(`Не удалось прочитать ${file.name}.`);
+    };
+    reader.readAsText(file);
+  }, []);
 
   useEffect(() => {
     try {
@@ -3848,7 +4226,7 @@ function App() {
     <main className="app">
       <header className="topbar">
         <div>
-          <p className="eyebrow">MediaPipe Pose Analyzer</p>
+          <p className="eyebrow">{captureEngines[captureEngine].title}</p>
           <div className="title-row">
             <h1>Сравнение скелетов в двух видео</h1>
             <span className="app-version-badge">{appVersion.name} {appVersion.versionLabel}</span>
@@ -3857,10 +4235,32 @@ function App() {
         </div>
         <div className="model-state">
           <Sparkles size={18} />
-          {landmarker && scanLandmarker ? "MediaPipe готов" : "Загрузка модели..."}
+          {captureEngine === "motioncap"
+            ? "MotionCap импорт CSV"
+            : landmarker && scanLandmarker
+              ? "MediaPipe готов"
+              : "Загрузка модели..."}
         </div>
       </header>
 
+      <TrackingEnginePanel
+        engine={captureEngine}
+        onChange={(engine) => {
+          setCaptureEngine(engine);
+          setRunState({ status: "idle", progress: 0, result: null, message: "" });
+        }}
+      />
+
+      {captureEngine === "motioncap" ? (
+        <MotionCapLab
+          leftScan={motionCapLeftScan}
+          rightScan={motionCapRightScan}
+          status={motionCapStatus}
+          onImport={importMotionCapCsv}
+          comparison={motionCapComparison}
+        />
+      ) : (
+        <>
       <MediaPipeSettingsPanel
         settings={mediaPipeSettings}
         onChange={(settings) => {
@@ -4168,6 +4568,8 @@ function App() {
         onClear={clearLabHistory}
         canSave={Boolean(runState.result?.ready)}
       />
+        </>
+      )}
     </main>
   );
 }

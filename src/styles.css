@@ -249,6 +249,73 @@ h3 {
   padding: 16px;
 }
 
+.engine-panel {
+  margin-top: -8px;
+}
+
+.engine-switch {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.engine-switch .model-card {
+  align-items: flex-start;
+  background: #f6f9fd;
+  flex-direction: column;
+  justify-content: flex-start;
+  min-height: 94px;
+  text-align: left;
+}
+
+.engine-switch .model-card.active {
+  background: #eaf4ff;
+  border-color: #0f6fdd;
+  box-shadow: 0 10px 24px rgba(15, 111, 221, 0.14);
+}
+
+.engine-switch .model-card span {
+  color: #52677c;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.motioncap-intro,
+.motioncap-status {
+  color: #3f5062;
+  line-height: 1.55;
+  margin: 0;
+}
+
+.motioncap-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.motioncap-card {
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.motioncap-card h3 {
+  margin-bottom: 0;
+}
+
+.motioncap-card-stats {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.motioncap-analysis {
+  margin-bottom: 18px;
+}
+
 .comparison-model-panel {
   background: #ffffff;
   border: 1px solid #dbe4ef;
@@ -1168,6 +1235,9 @@ h3 {
   .lab-controls,
   .settings-grid,
   .model-tabs,
+  .engine-switch,
+  .motioncap-grid,
+  .motioncap-card-stats,
   .pose-grid,
   .manual-sync-controls {
     grid-template-columns: 1fr;
