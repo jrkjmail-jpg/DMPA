@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.1",
-  versionLabel: "v0.6.1",
-  build: "zones-drawing-method-switches-2026-07-19"
+  version: "0.6.2",
+  versionLabel: "v0.6.2",
+  build: "zones-drawing-bone-length-normalization-2026-07-19"
 };
 
 const captureEngines = {
@@ -176,9 +176,9 @@ const comparisonModels = {
   },
   "zones-drawing": {
     id: "zones-drawing",
-    version: "0.1.0",
-    versionLabel: "v0.1.0",
-    algorithmBuild: "joint-zones-trajectory-drawing-2026-07-19",
+    version: "0.1.1",
+    versionLabel: "v0.1.1",
+    algorithmBuild: "joint-zones-trajectory-bone-normalized-2026-07-19",
     name: "Области + Рисунок",
     title: "Области + Рисунок",
     shortTitle: "9. Области + Рисунок",
@@ -536,9 +536,56 @@ function fittedPairLandmarks(pair, leftScan, rightScan) {
   const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
   const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
   if (!left?.length || !right?.length) return null;
+  const torsoFittedRight = fitNormalizedSkeletonToReference(left, right);
   return {
     left,
-    right: fitNormalizedSkeletonToReference(left, right)
+    right: matchBoneLengthsToReference(left, torsoFittedRight),
+    torsoFittedRight
+  };
+}
+
+const boneLengthMatchChains = [
+  [11, 13, 15],
+  [12, 14, 16],
+  [23, 25, 27],
+  [24, 26, 28]
+];
+
+function matchBoneLengthsToReference(referenceLandmarks, userLandmarks) {
+  if (!referenceLandmarks?.length || !userLandmarks?.length) return userLandmarks;
+  const fitted = userLandmarks.map((point) => (point ? { ...point } : point));
+
+  for (const [rootId, middleId, endId] of boneLengthMatchChains) {
+    fitBoneSegment(referenceLandmarks, fitted, rootId, middleId);
+    fitBoneSegment(referenceLandmarks, fitted, middleId, endId);
+  }
+
+  return fitted;
+}
+
+function fitBoneSegment(referenceLandmarks, targetLandmarks, rootId, childId) {
+  const referenceRoot = referenceLandmarks?.[rootId];
+  const referenceChild = referenceLandmarks?.[childId];
+  const targetRoot = targetLandmarks?.[rootId];
+  const targetChild = targetLandmarks?.[childId];
+  const referenceLength = pointDistance(referenceRoot, referenceChild);
+  if (!referenceRoot || !referenceChild || !targetRoot || !targetChild || !Number.isFinite(referenceLength) || referenceLength <= 0) return;
+
+  const dx = targetChild.x - targetRoot.x;
+  const dy = targetChild.y - targetRoot.y;
+  const dz = (targetChild.z || 0) - (targetRoot.z || 0);
+  const targetLength = Math.hypot(dx, dy, dz);
+  if (!Number.isFinite(targetLength) || targetLength <= 0.000001) {
+    targetLandmarks[childId] = { ...targetChild, x: referenceChild.x, y: referenceChild.y, z: referenceChild.z || 0 };
+    return;
+  }
+
+  const scale = referenceLength / targetLength;
+  targetLandmarks[childId] = {
+    ...targetChild,
+    x: targetRoot.x + dx * scale,
+    y: targetRoot.y + dy * scale,
+    z: (targetRoot.z || 0) + dz * scale
   };
 }
 
@@ -597,6 +644,7 @@ function compareZonesDrawingScans(leftScan, rightScan, sync, hybridMethods = def
     },
     diagnostics: {
       hybridMethods: methods,
+      boneLengthNormalization: "reference-limb-bones",
       zoneDrawingJoints: zoneDrawingJointSpecs.length,
       trackingOutliersSkipped: anglePairs.skipped,
       referenceOutliersSkipped: anglePairs.leftSkipped,
