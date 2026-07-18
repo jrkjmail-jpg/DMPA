@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.5",
-  versionLabel: "v0.6.5",
-  build: "split-zones-drawing-visualization-2026-07-19"
+  version: "0.6.6",
+  versionLabel: "v0.6.6",
+  build: "split-area-and-drawing-models-2026-07-19"
 };
 
 const captureEngines = {
@@ -174,16 +174,27 @@ const comparisonModels = {
     description:
       "Серверная AI-модель: требует доказательство выполнения хореографической фразы, отделяет качество скана от качества танца и строго ограничивает оценку при отсутствии движения."
   },
-  "zones-drawing": {
-    id: "zones-drawing",
-    version: "0.1.3",
-    versionLabel: "v0.1.3",
-    algorithmBuild: "joint-zones-trajectory-bone-normalized-split-visualization-2026-07-19",
-    name: "Области + Рисунок",
-    title: "Области + Рисунок",
-    shortTitle: "9. Области + Рисунок",
+  "joint-areas": {
+    id: "joint-areas",
+    version: "0.1.0",
+    versionLabel: "v0.1.0",
+    algorithmBuild: "joint-area-hit-bone-normalized-2026-07-19",
+    name: "Области",
+    title: "Области",
+    shortTitle: "9. Области",
     description:
-      "Экспериментальная модель: внутри одной карточки можно включать зоны вокруг суставов и рисунок траекторий активных точек."
+      "Сравнивает попадание активных суставов правого видео в области вокруг суставов эталона после нормализации корпуса и костей."
+  },
+  "trajectory-drawing": {
+    id: "trajectory-drawing",
+    version: "0.1.0",
+    versionLabel: "v0.1.0",
+    algorithmBuild: "active-joint-trajectory-drawing-2026-07-19",
+    name: "Рисунок",
+    title: "Рисунок",
+    shortTitle: "10. Рисунок",
+    description:
+      "Сравнивает рисунки траекторий активных точек по коротким фразам: куда и как двигались кисти, локти, колени и стопы."
   },
   "zone-grid": {
     id: "zone-grid",
@@ -192,7 +203,7 @@ const comparisonModels = {
     algorithmBuild: "centered-bone-normalized-zone-grid-2026-07-19",
     name: "Зоны",
     title: "Зоны",
-    shortTitle: "10. Зоны",
+    shortTitle: "11. Зоны",
     description:
       "Скелеты центрируются отдельно, длины костей приводятся к эталону, а точки сравниваются по попаданию в одинаковые квадраты сетки."
   }
@@ -674,6 +685,103 @@ function compareZonesDrawingScans(leftScan, rightScan, sync, hybridMethods = def
   };
 }
 
+function synchronizedFittedPairs(leftScan, rightScan, sync) {
+  const offset = sync?.ready ? sync.offsetSeconds : 0;
+  const anglePairs = synchronizedAngleFramePairs(leftScan, rightScan, offset);
+  const pairs = anglePairs.pairs
+    .map((pair) => ({ ...pair, fitted: fittedPairLandmarks(pair, leftScan, rightScan) }))
+    .filter((pair) => pair.fitted?.left?.length && pair.fitted?.right?.length);
+  return { ...anglePairs, pairs };
+}
+
+function compareJointAreasScans(leftScan, rightScan, sync) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null);
+  const anglePairs = synchronizedFittedPairs(leftScan, rightScan, sync);
+  const pairs = anglePairs.pairs;
+  if (!pairs.length) return comparePoseFrames(null, null);
+
+  const areas = compareJointZonesPairs(pairs, { prefix: "joint-areas", totalTitle: "Области: все активные суставы" });
+  const frameScores = pairs.map((pair) => compareZoneFrameScore(pair).score).filter(Number.isFinite);
+  const worstFrame = pairs
+    .map((pair) => ({ pair, score: compareZoneFrameScore(pair).score }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((a, b) => a.score - b.score)[0];
+  const score = clampPercent(areas.score);
+
+  return {
+    ready: true,
+    method: "Области",
+    score,
+    finalScore: score,
+    rows: areas.rows,
+    suggestions: areas.suggestions,
+    framesCompared: pairs.length,
+    bestScore: clampPercent(Math.max(...frameScores)),
+    worstScore: clampPercent(Math.min(...frameScores)),
+    durationCompared: Number((pairs.at(-1).leftTime - pairs[0].leftTime).toFixed(1)),
+    worstMoment: worstFrame
+      ? {
+          leftTime: worstFrame.pair.leftTime,
+          rightTime: worstFrame.pair.rightTime,
+          score: clampPercent(worstFrame.score)
+        }
+      : null,
+    bodyParts: {
+      arms: clampPercent(areas.bodyParts?.arms),
+      legs: clampPercent(areas.bodyParts?.legs),
+      torso: 100,
+      head: 0,
+      rhythm: sync?.ready ? clampPercent((sync.confidence || 0) * 100) : 75
+    },
+    diagnostics: {
+      areaHitRule: "inside-area-is-100-outside-has-falloff",
+      boneLengthNormalization: "reference-limb-bones",
+      trackingOutliersSkipped: anglePairs.skipped,
+      referenceOutliersSkipped: anglePairs.leftSkipped,
+      userOutliersSkipped: anglePairs.rightSkipped
+    },
+    verdict: verdictForScore(score, areas.suggestions)
+  };
+}
+
+function compareTrajectoryDrawingScans(leftScan, rightScan, sync) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null);
+  const anglePairs = synchronizedFittedPairs(leftScan, rightScan, sync);
+  const pairs = anglePairs.pairs;
+  if (!pairs.length) return comparePoseFrames(null, null);
+
+  const drawing = compareTrajectoryDrawingPairs(pairs, { prefix: "trajectory-drawing" });
+  const score = clampPercent(drawing.score);
+  return {
+    ready: true,
+    method: "Рисунок",
+    score,
+    finalScore: score,
+    rows: drawing.rows,
+    suggestions: drawing.suggestions,
+    framesCompared: pairs.length,
+    bestScore: null,
+    worstScore: null,
+    durationCompared: Number((pairs.at(-1).leftTime - pairs[0].leftTime).toFixed(1)),
+    worstMoment: null,
+    bodyParts: {
+      arms: clampPercent(drawing.bodyParts?.arms),
+      legs: clampPercent(drawing.bodyParts?.legs),
+      torso: 100,
+      head: 0,
+      rhythm: sync?.ready ? clampPercent((sync.confidence || 0) * 100) : 75
+    },
+    diagnostics: {
+      trajectorySegmentSeconds: 2,
+      boneLengthNormalization: "reference-limb-bones",
+      trackingOutliersSkipped: anglePairs.skipped,
+      referenceOutliersSkipped: anglePairs.leftSkipped,
+      userOutliersSkipped: anglePairs.rightSkipped
+    },
+    verdict: verdictForScore(score, drawing.suggestions)
+  };
+}
+
 function gridPairLandmarks(pair, leftScan, rightScan) {
   const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
   const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
@@ -791,7 +899,9 @@ function zoneCellScore(leftCell, rightCell) {
   return clampPercent(100 - distance * 18);
 }
 
-function compareJointZonesPairs(pairs) {
+function compareJointZonesPairs(pairs, options = {}) {
+  const prefix = options.prefix || "zones-drawing";
+  const totalTitle = options.totalTitle || "Области суставов";
   const scores = [];
   const groupScores = { arms: [], legs: [] };
   const jointAverages = new Map();
@@ -802,7 +912,7 @@ function compareJointZonesPairs(pairs) {
       const rightPoint = pair.fitted.right?.[spec.id];
       const distance = pointDistance(leftPoint, rightPoint);
       if (!Number.isFinite(distance)) continue;
-      const score = clampPercent(100 - (distance / spec.radius) * 100);
+      const score = areaHitScore(distance, spec.radius);
       scores.push(score);
       groupScores[spec.group]?.push(score);
       const current = jointAverages.get(spec.id) || { spec, scores: [] };
@@ -812,7 +922,7 @@ function compareJointZonesPairs(pairs) {
   }
 
   const jointRows = Array.from(jointAverages.values())
-    .map(({ spec, scores: itemScores }) => rowPercent(`zones-drawing-zone-${spec.key}`, `Область: ${spec.title}`, averageNumbers(itemScores)))
+    .map(({ spec, scores: itemScores }) => rowPercent(`${prefix}-zone-${spec.key}`, `Область: ${spec.title}`, averageNumbers(itemScores)))
     .sort((a, b) => a.score - b.score);
   const worst = jointRows.slice(0, 3);
 
@@ -825,16 +935,22 @@ function compareJointZonesPairs(pairs) {
       legs: averageNumbers(groupScores.legs)
     },
     rows: [
-      rowPercent("zones-drawing-zones", "Области суставов", averageNumbers(scores)),
-      rowPercent("zones-drawing-zones-arms", "Области рук", averageNumbers(groupScores.arms)),
-      rowPercent("zones-drawing-zones-legs", "Области ног", averageNumbers(groupScores.legs)),
+      rowPercent(`${prefix}-zones`, totalTitle, averageNumbers(scores)),
+      rowPercent(`${prefix}-zones-arms`, "Области рук", averageNumbers(groupScores.arms)),
+      rowPercent(`${prefix}-zones-legs`, "Области ног", averageNumbers(groupScores.legs)),
       ...worst
     ],
     suggestions: worst.map((row) => `${row.title.replace("Область: ", "")}: чаще всего выходит из своей зоны.`)
   };
 }
 
-function compareTrajectoryDrawingPairs(pairs) {
+function areaHitScore(distance, radius) {
+  if (distance <= radius) return 100;
+  return clampPercent(100 - ((distance - radius) / Math.max(radius, 0.001)) * 70);
+}
+
+function compareTrajectoryDrawingPairs(pairs, options = {}) {
+  const prefix = options.prefix || "zones-drawing";
   const segmentSeconds = 2;
   const startTime = pairs[0]?.leftTime || 0;
   const segmentMap = new Map();
@@ -858,7 +974,7 @@ function compareTrajectoryDrawingPairs(pairs) {
       groupScores[spec.group]?.push(score);
     }
     if (jointScores.length) {
-      rows.push(rowPercent(`zones-drawing-trajectory-${spec.key}`, `Рисунок: ${spec.title}`, averageNumbers(jointScores)));
+      rows.push(rowPercent(`${prefix}-trajectory-${spec.key}`, `Рисунок: ${spec.title}`, averageNumbers(jointScores)));
     }
   }
 
@@ -872,9 +988,9 @@ function compareTrajectoryDrawingPairs(pairs) {
       legs: averageNumbers(groupScores.legs)
     },
     rows: [
-      rowPercent("zones-drawing-trajectory", "Рисунок движения", averageNumbers(scores)),
-      rowPercent("zones-drawing-trajectory-arms", "Рисунок рук", averageNumbers(groupScores.arms)),
-      rowPercent("zones-drawing-trajectory-legs", "Рисунок ног", averageNumbers(groupScores.legs)),
+      rowPercent(`${prefix}-trajectory`, "Рисунок движения", averageNumbers(scores)),
+      rowPercent(`${prefix}-trajectory-arms`, "Рисунок рук", averageNumbers(groupScores.arms)),
+      rowPercent(`${prefix}-trajectory-legs`, "Рисунок ног", averageNumbers(groupScores.legs)),
       ...worst
     ],
     suggestions: worst.map((row) => `${row.title.replace("Рисунок: ", "")}: траектория отличается от эталона.`)
@@ -885,7 +1001,7 @@ function compareZoneFrameScore(pair) {
   const scores = zoneDrawingJointSpecs
     .map((spec) => {
       const distance = pointDistance(pair.fitted.left?.[spec.id], pair.fitted.right?.[spec.id]);
-      return Number.isFinite(distance) ? 100 - (distance / spec.radius) * 100 : null;
+      return Number.isFinite(distance) ? areaHitScore(distance, spec.radius) : null;
     })
     .filter(Number.isFinite);
   return { score: averageNumbers(scores) };
@@ -970,6 +1086,8 @@ function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio, hy
   if (model === "2026-07-12") return compareScans20260712(leftScan, rightScan, sync);
   if (model === "2026-07-13") return compareScans20260713(leftScan, rightScan, sync);
   if (model === "zones-drawing") return compareZonesDrawingScans(leftScan, rightScan, sync, hybridMethods);
+  if (model === "joint-areas") return compareJointAreasScans(leftScan, rightScan, sync);
+  if (model === "trajectory-drawing") return compareTrajectoryDrawingScans(leftScan, rightScan, sync);
   if (model === "zone-grid") return compareZoneGridScans(leftScan, rightScan, sync);
   return compareScans(leftScan, rightScan, sync, regions);
 }
@@ -3391,11 +3509,7 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
   );
 }
 
-function ComparisonModelPanel({ model, onChange, hybridMethods, onHybridMethodsChange }) {
-  const updateHybridMethod = (key, checked) => {
-    onHybridMethodsChange((previous) => normalizeHybridMethodSettings({ ...previous, [key]: checked }));
-  };
-
+function ComparisonModelPanel({ model, onChange }) {
   return (
     <section className="comparison-model-panel">
       <div className="settings-title">
@@ -3421,30 +3535,6 @@ function ComparisonModelPanel({ model, onChange, hybridMethods, onHybridMethodsC
               {item.shortTitle} {item.versionLabel ? `· ${item.versionLabel}` : ""}
             </strong>
             <span>{item.description}</span>
-            {key === "zones-drawing" && (
-              <div
-                className="hybrid-method-toggles"
-                onClick={(event) => event.stopPropagation()}
-                onKeyDown={(event) => event.stopPropagation()}
-              >
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={hybridMethods.zones}
-                    onChange={(event) => updateHybridMethod("zones", event.target.checked)}
-                  />
-                  Области
-                </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={hybridMethods.drawing}
-                    onChange={(event) => updateHybridMethod("drawing", event.target.checked)}
-                  />
-                  Рисунок движения
-                </label>
-              </div>
-            )}
           </div>
         ))}
       </div>
@@ -4162,11 +4252,15 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
   );
 }
 
-function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hybridMethods }) {
+function AreasDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, mode = "areas" }) {
   const canvasRef = useRef(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const methods = normalizeHybridMethodSettings(hybridMethods);
+  const methods = {
+    zones: mode === "areas",
+    drawing: mode === "drawing"
+  };
+  const title = mode === "drawing" ? "Рисунок" : "Области";
   const pairs = useMemo(() => {
     if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
     const allPairs = synchronizedAngleFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0).pairs
@@ -4214,23 +4308,24 @@ function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hy
       drawZonesDrawingScene(ctx, pair, trajectoryPairs, rect.width, rect.height, methods);
       ctx.fillStyle = "#d8e8fa";
       ctx.font = "700 13px Inter, sans-serif";
-      ctx.fillText(`Области + Рисунок: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
+      ctx.fillText(`${title}: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
     } else {
       ctx.fillStyle = "#d8e8fa";
       ctx.font = "700 15px Inter, sans-serif";
-      ctx.fillText("Запустите полный анализ модели «Области + Рисунок», чтобы увидеть зоны и траектории.", 14, 28);
+      ctx.fillText(`Запустите полный анализ модели «${title}», чтобы увидеть визуализацию.`, 14, 28);
     }
-  }, [methods.drawing, methods.zones, pair, trajectoryPairs]);
+  }, [methods.drawing, methods.zones, pair, title, trajectoryPairs]);
 
   const frameScore = pair ? compareZoneFrameScore(pair).score : null;
-  const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").startsWith("zones-drawing")).slice(0, 6);
+  const rowPrefix = mode === "drawing" ? "trajectory-drawing" : "joint-areas";
+  const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").startsWith(rowPrefix)).slice(0, 6);
 
   return (
     <section className={`skeleton-lab zones-drawing-lab ${enabled ? "" : "hidden"}`}>
       <div className="sync-header">
         <div>
-          <p className="eyebrow">Zone + Drawing Lab</p>
-          <h2>Визуализация модели «Области + Рисунок»</h2>
+          <p className="eyebrow">{mode === "drawing" ? "Drawing Lab" : "Area Lab"}</p>
+          <h2>{`Визуализация модели «${title}»`}</h2>
         </div>
         <div className="legend">
           <span>
@@ -4239,12 +4334,16 @@ function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hy
           <span>
             <i className="skeleton-right" /> правое видео
           </span>
-          <span>
-            <i className="zone-color" /> области
-          </span>
-          <span>
-            <i className="trajectory-color" /> рисунки
-          </span>
+          {mode === "areas" && (
+            <span>
+              <i className="zone-color" /> области
+            </span>
+          )}
+          {mode === "drawing" && (
+            <span>
+              <i className="trajectory-color" /> рисунки
+            </span>
+          )}
         </div>
       </div>
       <canvas ref={canvasRef} className="skeleton-canvas zones-drawing-canvas" />
@@ -4282,7 +4381,7 @@ function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hy
         </span>
         <span>Эталон: {pair ? formatSeconds(pair.leftTime, 2) : "-"}</span>
         <span>Правое: {pair ? formatSeconds(pair.rightTime, 2) : "-"}</span>
-        <span>Попадание в области: {frameScore != null ? `${clampPercent(frameScore)}%` : "-"}</span>
+        {mode === "areas" && <span>Попадание в области: {frameScore != null ? `${clampPercent(frameScore)}%` : "-"}</span>}
         <span>Итог модели: {comparison?.ready ? `${comparison.score}%` : "-"}</span>
       </div>
       {modelRows.length > 0 && (
@@ -4295,8 +4394,9 @@ function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hy
         </div>
       )}
       <p className="sync-note">
-        Две панели показывают механику модели отдельно: слева эталон, справа правое видео. Круги показывают области вокруг суставов, а
-        линии показывают рисунок движения активных точек за короткий фрагмент вокруг выбранного кадра.
+        {mode === "areas"
+          ? "Две панели показывают попадание суставов в области отдельно: слева эталон, справа правое видео. Зеленая область означает, что точка находится внутри допустимой зоны."
+          : "Две панели показывают рисунок движения отдельно: слева траектории эталона, справа траектории правого видео за короткий фрагмент вокруг выбранного кадра."}
       </p>
     </section>
   );
@@ -4876,6 +4976,8 @@ function App() {
       );
     }
     if (comparisonModel === "zones-drawing") return compareZonesDrawingScans(leftScan, rightScan, activeSync, hybridMethods);
+    if (comparisonModel === "joint-areas") return compareJointAreasScans(leftScan, rightScan, activeSync);
+    if (comparisonModel === "trajectory-drawing") return compareTrajectoryDrawingScans(leftScan, rightScan, activeSync);
     if (comparisonModel === "zone-grid") return compareZoneGridScans(leftScan, rightScan, activeSync);
     return comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions);
   }, [activeSync, comparisonModel, hybridMethods, leftPose, leftScan, mediaPipeSettings.regions, rightPose, rightScan]);
@@ -5340,8 +5442,6 @@ function App() {
 
       <ComparisonModelPanel
         model={comparisonModel}
-        hybridMethods={hybridMethods}
-        onHybridMethodsChange={setHybridMethods}
         onChange={(model) => {
           setComparisonModel(model);
           setRunState({
@@ -5504,13 +5604,13 @@ function App() {
         modelId={comparisonModel === "2026-07-13" ? "2026-07-13" : "2026-07-12"}
       />
 
-      <ZonesDrawingViewer
+      <AreasDrawingViewer
         leftScan={leftScan}
         rightScan={rightScan}
         sync={activeSync}
         comparison={comparison}
-        enabled={comparisonModel === "zones-drawing" && Boolean(runState.result?.ready)}
-        hybridMethods={hybridMethods}
+        enabled={(comparisonModel === "joint-areas" || comparisonModel === "trajectory-drawing") && Boolean(runState.result?.ready)}
+        mode={comparisonModel === "trajectory-drawing" ? "drawing" : "areas"}
       />
 
       <ZoneGridViewer
