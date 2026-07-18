@@ -879,6 +879,14 @@ h3 {
   background: #f7c948;
 }
 
+.zone-match-color {
+  background: #28d7a4;
+}
+
+.zone-miss-color {
+  background: #ff6b6b;
+}
+
 .waveform-canvas {
   border: 1px solid #dbe4ef;
   border-radius: 8px;

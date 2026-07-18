@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.3",
-  versionLabel: "v0.6.3",
-  build: "zones-drawing-visualization-2026-07-19"
+  version: "0.6.4",
+  versionLabel: "v0.6.4",
+  build: "zone-grid-comparison-2026-07-19"
 };
 
 const captureEngines = {
@@ -184,6 +184,17 @@ const comparisonModels = {
     shortTitle: "9. Области + Рисунок",
     description:
       "Экспериментальная модель: внутри одной карточки можно включать зоны вокруг суставов и рисунок траекторий активных точек."
+  },
+  "zone-grid": {
+    id: "zone-grid",
+    version: "0.1.0",
+    versionLabel: "v0.1.0",
+    algorithmBuild: "centered-bone-normalized-zone-grid-2026-07-19",
+    name: "Зоны",
+    title: "Зоны",
+    shortTitle: "10. Зоны",
+    description:
+      "Скелеты центрируются отдельно, длины костей приводятся к эталону, а точки сравниваются по попаданию в одинаковые квадраты сетки."
   }
 };
 
@@ -202,6 +213,15 @@ const zoneDrawingJointSpecs = [
   { id: 27, key: "leftAnkle", title: "Левая стопа", group: "legs", radius: 0.28 },
   { id: 28, key: "rightAnkle", title: "Правая стопа", group: "legs", radius: 0.28 }
 ];
+
+const zoneGridConfig = {
+  columns: 16,
+  rows: 14,
+  xMin: -2.2,
+  xMax: 2.2,
+  yMin: -2.6,
+  yMax: 2.4
+};
 
 const runnableComparisonModelIds = Object.keys(comparisonModels).filter((id) => id !== "all-auto");
 
@@ -654,6 +674,123 @@ function compareZonesDrawingScans(leftScan, rightScan, sync, hybridMethods = def
   };
 }
 
+function gridPairLandmarks(pair, leftScan, rightScan) {
+  const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
+  const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
+  if (!left?.length || !right?.length) return null;
+  return {
+    left,
+    right: matchBoneLengthsToReference(left, right)
+  };
+}
+
+function compareZoneGridScans(leftScan, rightScan, sync) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null);
+
+  const offset = sync?.ready ? sync.offsetSeconds : 0;
+  const anglePairs = synchronizedAngleFramePairs(leftScan, rightScan, offset);
+  const pairs = anglePairs.pairs
+    .map((pair) => ({ ...pair, fitted: gridPairLandmarks(pair, leftScan, rightScan) }))
+    .filter((pair) => pair.fitted?.left?.length && pair.fitted?.right?.length);
+
+  if (!pairs.length) return comparePoseFrames(null, null);
+
+  const scores = [];
+  const groupScores = { arms: [], legs: [] };
+  const jointAverages = new Map();
+  const frameScores = [];
+  let worstFrame = null;
+
+  for (const pair of pairs) {
+    const frameScoresForJoints = [];
+    for (const spec of zoneDrawingJointSpecs) {
+      const leftCell = pointToZoneCell(pair.fitted.left?.[spec.id]);
+      const rightCell = pointToZoneCell(pair.fitted.right?.[spec.id]);
+      if (!leftCell || !rightCell) continue;
+      const score = zoneCellScore(leftCell, rightCell);
+      scores.push(score);
+      frameScoresForJoints.push(score);
+      groupScores[spec.group]?.push(score);
+      const current = jointAverages.get(spec.id) || { spec, scores: [] };
+      current.scores.push(score);
+      jointAverages.set(spec.id, current);
+    }
+    const frameScore = averageNumbers(frameScoresForJoints);
+    if (Number.isFinite(frameScore)) {
+      frameScores.push(frameScore);
+      if (!worstFrame || frameScore < worstFrame.score) worstFrame = { pair, score: frameScore };
+    }
+  }
+
+  const jointRows = Array.from(jointAverages.values())
+    .map(({ spec, scores: itemScores }) => rowPercent(`zone-grid-${spec.key}`, `Сетка: ${spec.title}`, averageNumbers(itemScores)))
+    .sort((a, b) => a.score - b.score);
+  const worst = jointRows.slice(0, 4);
+  const score = clampPercent(averageNumbers(scores));
+  const suggestions = worst.map((row) => `${row.title.replace("Сетка: ", "")}: чаще попадает в другой сектор сетки.`);
+
+  return {
+    ready: true,
+    method: "Зоны",
+    score,
+    finalScore: score,
+    rows: [
+      rowPercent("zone-grid-total", "Зоны: все активные точки", score),
+      rowPercent("zone-grid-arms", "Зоны рук", averageNumbers(groupScores.arms)),
+      rowPercent("zone-grid-legs", "Зоны ног", averageNumbers(groupScores.legs)),
+      ...worst
+    ],
+    suggestions,
+    framesCompared: pairs.length,
+    bestScore: clampPercent(Math.max(...frameScores)),
+    worstScore: clampPercent(Math.min(...frameScores)),
+    durationCompared: Number((pairs.at(-1).leftTime - pairs[0].leftTime).toFixed(1)),
+    worstMoment: worstFrame
+      ? {
+          leftTime: worstFrame.pair.leftTime,
+          rightTime: worstFrame.pair.rightTime,
+          score: clampPercent(worstFrame.score)
+        }
+      : null,
+    bodyParts: {
+      arms: clampPercent(averageNumbers(groupScores.arms)),
+      legs: clampPercent(averageNumbers(groupScores.legs)),
+      torso: 100,
+      head: 0,
+      rhythm: sync?.ready ? clampPercent((sync.confidence || 0) * 100) : 75
+    },
+    diagnostics: {
+      zoneGrid: zoneGridConfig,
+      comparedJoints: zoneDrawingJointSpecs.map((spec) => spec.key),
+      boneLengthNormalization: "reference-limb-bones",
+      skeletonAlignment: "separate-centered-grids",
+      trackingOutliersSkipped: anglePairs.skipped,
+      referenceOutliersSkipped: anglePairs.leftSkipped,
+      userOutliersSkipped: anglePairs.rightSkipped
+    },
+    verdict: verdictForScore(score, suggestions)
+  };
+}
+
+function pointToZoneCell(point) {
+  if (!point) return null;
+  const { columns, rows, xMin, xMax, yMin, yMax } = zoneGridConfig;
+  const xRatio = (point.x - xMin) / (xMax - xMin);
+  const yRatio = (point.y - yMin) / (yMax - yMin);
+  if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio)) return null;
+  return {
+    col: Math.max(0, Math.min(columns - 1, Math.floor(xRatio * columns))),
+    row: Math.max(0, Math.min(rows - 1, Math.floor(yRatio * rows)))
+  };
+}
+
+function zoneCellScore(leftCell, rightCell) {
+  const distance = Math.hypot(leftCell.col - rightCell.col, leftCell.row - rightCell.row);
+  if (distance <= 0) return 100;
+  if (distance <= 1) return 86;
+  return clampPercent(100 - distance * 18);
+}
+
 function compareJointZonesPairs(pairs) {
   const scores = [];
   const groupScores = { arms: [], legs: [] };
@@ -833,6 +970,7 @@ function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio, hy
   if (model === "2026-07-12") return compareScans20260712(leftScan, rightScan, sync);
   if (model === "2026-07-13") return compareScans20260713(leftScan, rightScan, sync);
   if (model === "zones-drawing") return compareZonesDrawingScans(leftScan, rightScan, sync, hybridMethods);
+  if (model === "zone-grid") return compareZoneGridScans(leftScan, rightScan, sync);
   return compareScans(leftScan, rightScan, sync, regions);
 }
 
@@ -4164,6 +4302,241 @@ function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hy
   );
 }
 
+function ZoneGridViewer({ leftScan, rightScan, sync, comparison, enabled }) {
+  const canvasRef = useRef(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const pairs = useMemo(() => {
+    if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
+    const allPairs = synchronizedAngleFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0).pairs
+      .map((pair) => ({ ...pair, fitted: gridPairLandmarks(pair, leftScan, rightScan) }))
+      .filter((pair) => pair.fitted?.left?.length && pair.fitted?.right?.length);
+    const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
+    return allPairs.filter((_, index) => index % stride === 0);
+  }, [enabled, leftScan, rightScan, sync]);
+  const pair = pairs[currentIndex] || null;
+
+  useEffect(() => {
+    setCurrentIndex(0);
+    setIsPlaying(false);
+  }, [pairs.length]);
+
+  useEffect(() => {
+    if (!enabled || !isPlaying || pairs.length < 2) return undefined;
+    const timer = window.setInterval(() => {
+      setCurrentIndex((index) => (index + 1) % pairs.length);
+    }, 180);
+    return () => window.clearInterval(timer);
+  }, [enabled, isPlaying, pairs.length]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = "#101827";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
+    if (pair) {
+      drawZoneGridScene(ctx, pair, rect.width, rect.height);
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 13px Inter, sans-serif";
+      ctx.fillText(`Зоны: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
+    } else {
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 15px Inter, sans-serif";
+      ctx.fillText("Запустите полный анализ модели «Зоны», чтобы увидеть две сетки сравнения.", 14, 28);
+    }
+  }, [pair]);
+
+  const frameScore = pair ? compareZoneGridFrameScore(pair) : null;
+  const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").startsWith("zone-grid")).slice(0, 6);
+
+  return (
+    <section className={`skeleton-lab zone-grid-lab ${enabled ? "" : "hidden"}`}>
+      <div className="sync-header">
+        <div>
+          <p className="eyebrow">Zone Grid Lab</p>
+          <h2>Визуализация модели «Зоны»</h2>
+        </div>
+        <div className="legend">
+          <span>
+            <i className="skeleton-left" /> эталон
+          </span>
+          <span>
+            <i className="skeleton-right" /> правое видео
+          </span>
+          <span>
+            <i className="zone-match-color" /> тот же сектор
+          </span>
+          <span>
+            <i className="zone-miss-color" /> другой сектор
+          </span>
+        </div>
+      </div>
+      <canvas ref={canvasRef} className="skeleton-canvas zone-grid-canvas" />
+      <div className="overlay-controls">
+        <button type="button" onClick={() => setIsPlaying((value) => !value)} disabled={!pairs.length}>
+          {isPlaying ? <Pause size={17} /> : <Play size={17} />}
+          {isPlaying ? "Пауза" : "Play"}
+        </button>
+        <button type="button" onClick={() => setCurrentIndex((index) => Math.max(0, index - 1))} disabled={!pairs.length}>
+          Назад
+        </button>
+        <input
+          type="range"
+          min="0"
+          max={Math.max(0, pairs.length - 1)}
+          step="1"
+          value={Math.min(currentIndex, Math.max(0, pairs.length - 1))}
+          onChange={(event) => {
+            setIsPlaying(false);
+            setCurrentIndex(Number(event.target.value));
+          }}
+          disabled={!pairs.length}
+        />
+        <button
+          type="button"
+          onClick={() => setCurrentIndex((index) => Math.min(Math.max(0, pairs.length - 1), index + 1))}
+          disabled={!pairs.length}
+        >
+          Вперед
+        </button>
+      </div>
+      <div className="overlay-meta">
+        <span>
+          Кадр {pairs.length ? currentIndex + 1 : 0}/{pairs.length}
+        </span>
+        <span>Эталон: {pair ? formatSeconds(pair.leftTime, 2) : "-"}</span>
+        <span>Правое: {pair ? formatSeconds(pair.rightTime, 2) : "-"}</span>
+        <span>Попадание кадра: {frameScore != null ? `${clampPercent(frameScore)}%` : "-"}</span>
+        <span>Сетка: {zoneGridConfig.columns * zoneGridConfig.rows} квадратов</span>
+        <span>Итог модели: {comparison?.ready ? `${comparison.score}%` : "-"}</span>
+      </div>
+      {modelRows.length > 0 && (
+        <div className="elastic-metrics">
+          {modelRows.map((row) => (
+            <span key={row.id}>
+              {row.title}: <b>{row.score}%</b>
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="sync-note">
+        Здесь скелеты не накладываются друг на друга: эталон и правое видео стоят в двух одинаковых сетках. Оценка строится по тому,
+        насколько одинаковые суставы попадают в такие же или соседние квадраты.
+      </p>
+    </section>
+  );
+}
+
+function compareZoneGridFrameScore(pair) {
+  const scores = zoneDrawingJointSpecs
+    .map((spec) => {
+      const leftCell = pointToZoneCell(pair.fitted.left?.[spec.id]);
+      const rightCell = pointToZoneCell(pair.fitted.right?.[spec.id]);
+      return leftCell && rightCell ? zoneCellScore(leftCell, rightCell) : null;
+    })
+    .filter(Number.isFinite);
+  return averageNumbers(scores);
+}
+
+function drawZoneGridScene(ctx, pair, width, height) {
+  const gap = 18;
+  const top = 44;
+  const panelWidth = (width - gap * 3) / 2;
+  const panelHeight = height - top - 18;
+  const leftRect = { x: gap, y: top, width: panelWidth, height: panelHeight };
+  const rightRect = { x: gap * 2 + panelWidth, y: top, width: panelWidth, height: panelHeight };
+
+  drawZoneGridPanel(ctx, leftRect, "Эталон", pair.fitted.left, pair.fitted.right, "left");
+  drawZoneGridPanel(ctx, rightRect, "Правое видео", pair.fitted.right, pair.fitted.left, "right");
+}
+
+function drawZoneGridPanel(ctx, rect, title, landmarks, oppositeLandmarks, side) {
+  ctx.save();
+  ctx.strokeStyle = "rgba(216, 232, 250, 0.18)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  drawZoneGridLines(ctx, rect);
+  highlightZoneGridCells(ctx, rect, landmarks, oppositeLandmarks);
+  drawSkeletonInZoneGrid(ctx, landmarks, rect, side === "left" ? "#28d7a4" : "#55a4ff");
+  ctx.fillStyle = "#d8e8fa";
+  ctx.font = "800 13px Inter, sans-serif";
+  ctx.fillText(title, rect.x + 12, rect.y + 22);
+  ctx.restore();
+}
+
+function drawZoneGridLines(ctx, rect) {
+  const { columns, rows } = zoneGridConfig;
+  ctx.strokeStyle = "rgba(216, 232, 250, 0.12)";
+  ctx.lineWidth = 1;
+  for (let col = 1; col < columns; col += 1) {
+    const x = rect.x + (rect.width / columns) * col;
+    ctx.beginPath();
+    ctx.moveTo(x, rect.y);
+    ctx.lineTo(x, rect.y + rect.height);
+    ctx.stroke();
+  }
+  for (let row = 1; row < rows; row += 1) {
+    const y = rect.y + (rect.height / rows) * row;
+    ctx.beginPath();
+    ctx.moveTo(rect.x, y);
+    ctx.lineTo(rect.x + rect.width, y);
+    ctx.stroke();
+  }
+}
+
+function highlightZoneGridCells(ctx, rect, landmarks, oppositeLandmarks) {
+  const { columns, rows } = zoneGridConfig;
+  for (const spec of zoneDrawingJointSpecs) {
+    const cell = pointToZoneCell(landmarks?.[spec.id]);
+    const oppositeCell = pointToZoneCell(oppositeLandmarks?.[spec.id]);
+    if (!cell || !oppositeCell) continue;
+    const sameCell = cell.col === oppositeCell.col && cell.row === oppositeCell.row;
+    ctx.fillStyle = sameCell ? "rgba(40, 215, 164, 0.16)" : "rgba(255, 103, 103, 0.15)";
+    ctx.fillRect(rect.x + (rect.width / columns) * cell.col, rect.y + (rect.height / rows) * cell.row, rect.width / columns, rect.height / rows);
+  }
+}
+
+function drawSkeletonInZoneGrid(ctx, landmarks, rect, color) {
+  if (!landmarks?.length) return;
+  const ids = new Set(zoneDrawingJointSpecs.map((spec) => spec.id).concat([11, 12, 23, 24]));
+  const project = (point) => pointToZoneGridCanvas(point, rect);
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  ctx.lineWidth = 2;
+  for (const [a, b] of poseConnections) {
+    if (!ids.has(a) || !ids.has(b) || !landmarks[a] || !landmarks[b]) continue;
+    const pa = project(landmarks[a]);
+    const pb = project(landmarks[b]);
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+  }
+  for (const id of ids) {
+    if (!landmarks[id]) continue;
+    const point = project(landmarks[id]);
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, zoneDrawingJointSpecs.some((spec) => spec.id === id) ? 4 : 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function pointToZoneGridCanvas(point, rect) {
+  const { xMin, xMax, yMin, yMax } = zoneGridConfig;
+  return {
+    x: rect.x + ((point.x - xMin) / (xMax - xMin)) * rect.width,
+    y: rect.y + ((point.y - yMin) / (yMax - yMin)) * rect.height
+  };
+}
+
 function drawZonesDrawingScene(ctx, pair, trajectoryPairs, width, height, methods) {
   const left = pair.fitted.left;
   const right = pair.fitted.right;
@@ -4448,6 +4821,7 @@ function App() {
       );
     }
     if (comparisonModel === "zones-drawing") return compareZonesDrawingScans(leftScan, rightScan, activeSync, hybridMethods);
+    if (comparisonModel === "zone-grid") return compareZoneGridScans(leftScan, rightScan, activeSync);
     return comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions);
   }, [activeSync, comparisonModel, hybridMethods, leftPose, leftScan, mediaPipeSettings.regions, rightPose, rightScan]);
   const comparison = runState.result || (leftScan?.frames?.length && rightScan?.frames?.length ? pendingFullRunComparison() : liveComparison);
@@ -5082,6 +5456,14 @@ function App() {
         comparison={comparison}
         enabled={comparisonModel === "zones-drawing" && Boolean(runState.result?.ready)}
         hybridMethods={hybridMethods}
+      />
+
+      <ZoneGridViewer
+        leftScan={leftScan}
+        rightScan={rightScan}
+        sync={activeSync}
+        comparison={comparison}
+        enabled={comparisonModel === "zone-grid" && Boolean(runState.result?.ready)}
       />
 
       <section className="analysis-panel">
