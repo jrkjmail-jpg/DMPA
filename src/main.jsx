@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.6",
-  versionLabel: "v0.6.6",
-  build: "split-area-and-drawing-models-2026-07-19"
+  version: "0.6.7",
+  versionLabel: "v0.6.7",
+  build: "autonomous-ensemble-lab-2026-07-19"
 };
 
 const captureEngines = {
@@ -2740,6 +2740,168 @@ function sameFileCandidate(left, right) {
   return left.name === right.name && left.size === right.size && durationDiff < 0.05;
 }
 
+function inferAutonomousCase(fileName = "") {
+  const normalized = fileName.toLowerCase();
+  if (/стоит|сто[яи]т|stand|still|static|stop/.test(normalized)) {
+    return { type: "STANDING_STILL", label: "Стоит / почти не выполняет", target: "низко" };
+  }
+  if (/не\s*похож|непохож|different|wrong|друг/.test(normalized)) {
+    return { type: "UNRELATED_DANCE", label: "Другая / непохожая фраза", target: "низко" };
+  }
+  if (/очень\s*похож|похож|good|repeat|match|учен/.test(normalized)) {
+    return { type: "GOOD_REPEAT", label: "Хорошее повторение", target: "высоко" };
+  }
+  if (/эталон|reference|ref|teacher/.test(normalized)) {
+    return { type: "SELF_CHECK_OR_REFERENCE", label: "Техническая проверка", target: "100 только для диагностики" };
+  }
+  return { type: "UNKNOWN", label: "Неизвестный тип", target: "проверить вручную" };
+}
+
+function autonomousEnsembleScore(modelScores = {}) {
+  const weights = {
+    "joint-areas": 0.28,
+    "zone-grid": 0.16,
+    "trajectory-drawing": 0.18,
+    "2026-07-13": 0.2,
+    "2026-07-12": 0.08,
+    "openai-expert": 0.1
+  };
+  const entries = Object.entries(modelScores).filter(([, score]) => Number.isFinite(score));
+  if (!entries.length) return null;
+  const weighted = entries.reduce(
+    (acc, [modelId, score]) => {
+      const weight = weights[modelId] ?? 0.06;
+      acc.sum += score * weight;
+      acc.weight += weight;
+      return acc;
+    },
+    { sum: 0, weight: 0 }
+  );
+  let score = weighted.weight ? weighted.sum / weighted.weight : averageNumbers(entries.map(([, value]) => value));
+  const jointAreas = modelScores["joint-areas"];
+  const zoneGrid = modelScores["zone-grid"];
+  const trajectory = modelScores["trajectory-drawing"];
+  if (Number.isFinite(jointAreas) && jointAreas < 35 && Number.isFinite(zoneGrid) && zoneGrid < 65) score = Math.min(score, 35);
+  if (Number.isFinite(jointAreas) && jointAreas < 45 && Number.isFinite(trajectory) && trajectory < 45) score = Math.min(score, 40);
+  if (Number.isFinite(jointAreas) && jointAreas >= 82 && Number.isFinite(zoneGrid) && zoneGrid >= 84) score = Math.max(score, 84);
+  return clampPercent(score);
+}
+
+function autonomousRecommendation(caseType, ensembleScore, modelScores = {}) {
+  if (!Number.isFinite(ensembleScore)) return "Недостаточно результатов.";
+  if (caseType === "STANDING_STILL" && ensembleScore > 25) return "Стояние все еще завышено: нужна motion-gate проверка амплитуды и событий движения.";
+  if (caseType === "UNRELATED_DANCE" && ensembleScore > 40) return "Непохожий танец завышен: усилить вес траектории и ключевых переходов.";
+  if (caseType === "GOOD_REPEAT" && ensembleScore < 80) return "Хорошее повторение занижено: проверить tolerance зон, синхронизацию и качество скана.";
+  const spread = Math.max(...Object.values(modelScores).filter(Number.isFinite)) - Math.min(...Object.values(modelScores).filter(Number.isFinite));
+  if (spread > 45) return "Модели сильно расходятся: этот пример полезен для настройки ансамбля.";
+  return "Ансамбль ведет себя ожидаемо для этого имени файла.";
+}
+
+function shuffledItems(items = []) {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function autonomousCaseTarget(caseType) {
+  if (caseType === "GOOD_REPEAT") return 90;
+  if (caseType === "SELF_CHECK_OR_REFERENCE") return 100;
+  if (caseType === "STANDING_STILL") return 8;
+  if (caseType === "UNRELATED_DANCE") return 22;
+  return 55;
+}
+
+function modelSubsetScore(modelScores = {}, modelIds = []) {
+  const subset = Object.fromEntries(modelIds.map((modelId) => [modelId, modelScores[modelId]]));
+  return autonomousEnsembleScore(subset);
+}
+
+function buildAutonomousTrials(results = [], selectedModels = []) {
+  if (!results.length || !selectedModels.length) return [];
+  const unique = new Map();
+  const addTrial = (models) => {
+    const clean = models.filter((modelId) => selectedModels.includes(modelId));
+    if (!clean.length) return;
+    const key = [...clean].sort().join("+");
+    if (!unique.has(key)) unique.set(key, clean);
+  };
+
+  selectedModels.forEach((modelId) => addTrial([modelId]));
+  addTrial(selectedModels);
+  for (let i = 0; i < Math.min(18, Math.max(6, selectedModels.length * 4)); i += 1) {
+    const shuffled = shuffledItems(selectedModels);
+    const size = 1 + Math.floor(Math.random() * selectedModels.length);
+    addTrial(shuffled.slice(0, size));
+  }
+
+  return Array.from(unique.values())
+    .map((models) => scoreAutonomousTrial(results, models))
+    .sort((a, b) => b.qualityScore - a.qualityScore)
+    .slice(0, 12);
+}
+
+function scoreAutonomousTrial(results = [], models = []) {
+  const evaluated = results.map((item) => {
+    const score = modelSubsetScore(item.modelScores, models);
+    const target = autonomousCaseTarget(item.caseType);
+    const error = Number.isFinite(score) ? Math.abs(score - target) : 100;
+    return {
+      fileName: item.fileName,
+      caseType: item.caseType,
+      caseLabel: item.caseLabel,
+      score,
+      target,
+      error
+    };
+  });
+  const averageError = averageNumbers(evaluated.map((item) => item.error));
+  const goodScores = evaluated.filter((item) => item.caseType === "GOOD_REPEAT").map((item) => item.score).filter(Number.isFinite);
+  const lowScores = evaluated
+    .filter((item) => item.caseType === "STANDING_STILL" || item.caseType === "UNRELATED_DANCE")
+    .map((item) => item.score)
+    .filter(Number.isFinite);
+  const selfScores = evaluated.filter((item) => item.caseType === "SELF_CHECK_OR_REFERENCE").map((item) => item.score).filter(Number.isFinite);
+  const separation = goodScores.length && lowScores.length ? averageNumbers(goodScores) - averageNumbers(lowScores) : 0;
+  const selfPenalty = selfScores.length ? Math.abs(100 - averageNumbers(selfScores)) * 0.35 : 0;
+  const qualityScore = clampPercent(100 - averageError + Math.max(0, separation) * 0.18 - selfPenalty);
+  return {
+    id: crypto.randomUUID(),
+    models,
+    modelLabel: models.map((modelId) => comparisonModels[modelId]?.title || modelId).join(" + "),
+    qualityScore,
+    averageError: Number(averageError.toFixed(1)),
+    separation: Number(separation.toFixed(1)),
+    evaluated,
+    summary: {
+      videosCompared: evaluated.length,
+      goodAverage: goodScores.length ? clampPercent(averageNumbers(goodScores)) : null,
+      lowAverage: lowScores.length ? clampPercent(averageNumbers(lowScores)) : null,
+      selfAverage: selfScores.length ? clampPercent(averageNumbers(selfScores)) : null
+    }
+  };
+}
+
+async function loadFileIntoVideo(video, file) {
+  if (!video || !file) throw new Error("Не выбран видеофайл.");
+  const url = URL.createObjectURL(file);
+  video.pause();
+  video.removeAttribute("src");
+  video.srcObject = null;
+  video.src = url;
+  video.muted = true;
+  video.preload = "auto";
+  try {
+    await waitForVideoEvent(video, "loadedmetadata");
+    return url;
+  } catch (err) {
+    URL.revokeObjectURL(url);
+    throw err;
+  }
+}
+
 const VideoPane = forwardRef(function VideoPane(
   {
     title,
@@ -3538,6 +3700,147 @@ function ComparisonModelPanel({ model, onChange }) {
           </div>
         ))}
       </div>
+    </section>
+  );
+}
+
+function AutonomousEnsembleLab({
+  referenceFile,
+  candidateFiles,
+  selectedModels,
+  runState,
+  onReferenceChange,
+  onCandidatesChange,
+  onToggleModel,
+  onRun,
+  onExport
+}) {
+  const selectableModels = runnableComparisonModelIds.filter((id) => id !== "openai-expert");
+  return (
+    <section className="autonomous-lab">
+      <div className="lab-header">
+        <div>
+          <p className="eyebrow">Autonomous Ensemble Lab</p>
+          <h2>Автономный анализ пачки видео</h2>
+        </div>
+        <span>{runState.results.length} результатов</span>
+      </div>
+
+      <div className="autonomous-grid">
+        <label className="file-drop">
+          <FileVideo size={18} />
+          <span>
+            <b>Эталон педагога</b>
+            {referenceFile ? referenceFile.name : "Выберите один файл"}
+          </span>
+          <input type="file" accept="video/*" onChange={(event) => onReferenceChange(event.target.files?.[0] || null)} />
+        </label>
+        <label className="file-drop">
+          <FileVideo size={18} />
+          <span>
+            <b>Видео учеников</b>
+            {candidateFiles.length ? `${candidateFiles.length} файлов` : "Выберите несколько файлов"}
+          </span>
+          <input type="file" accept="video/*" multiple onChange={(event) => onCandidatesChange(Array.from(event.target.files || []))} />
+        </label>
+      </div>
+
+      <div className="ensemble-models">
+        {selectableModels.map((modelId) => {
+          const modelItem = comparisonModels[modelId];
+          return (
+            <label key={modelId} className={selectedModels.includes(modelId) ? "selected" : ""}>
+              <input type="checkbox" checked={selectedModels.includes(modelId)} onChange={() => onToggleModel(modelId)} />
+              <span>
+                <b>{modelItem.title}</b>
+                {modelItem.versionLabel}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+
+      <div className="sync-actions autonomous-actions">
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={!referenceFile || !candidateFiles.length || !selectedModels.length || runState.status === "running"}
+        >
+          <Play size={18} />
+          {runState.status === "running" ? `Автоанализ ${runState.progress}%` : "Сравнить пачку"}
+        </button>
+        <button type="button" onClick={onExport} disabled={!runState.results.length}>
+          Экспорт ансамбля JSON
+        </button>
+        <span>{runState.message || "Имена файлов используются как подсказка: похожее, стоит, не похоже."}</span>
+      </div>
+
+      <div className={`run-status ${runState.status}`}>
+        <div>
+          <strong>{runState.status === "running" ? "Автономная лаборатория считает" : "Автономная лаборатория готова"}</strong>
+          <span>{runState.message || "Выберите эталон, видео учеников и модели."}</span>
+        </div>
+        <div className="run-progress" aria-label="Прогресс автономной лаборатории">
+          <i style={{ width: `${runState.progress}%` }} />
+        </div>
+      </div>
+
+      {runState.results.length > 0 && (
+        <div className="ensemble-table" style={{ "--model-count": selectedModels.length }}>
+          <div className="ensemble-row ensemble-head">
+            <span>Видео</span>
+            <span>Тип по имени</span>
+            <span>Ансамбль</span>
+            {selectedModels.map((modelId) => (
+              <span key={modelId}>{comparisonModels[modelId]?.title || modelId}</span>
+            ))}
+            <span>Вывод</span>
+          </div>
+          {runState.results.map((item) => (
+            <div className="ensemble-row" key={item.id}>
+              <span>{item.fileName}</span>
+              <span>{item.caseLabel}</span>
+              <strong>{item.ensembleScore == null ? "-" : `${item.ensembleScore}%`}</strong>
+              {selectedModels.map((modelId) => (
+                <span key={modelId}>{item.modelScores[modelId] == null ? "-" : `${item.modelScores[modelId]}%`}</span>
+              ))}
+              <span>{item.recommendation}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {runState.bestTrials?.length > 0 && (
+        <div className="ensemble-summary">
+          <div className="best-model-card">
+            <p className="eyebrow">Best Found</p>
+            <h3>{runState.bestTrials[0].modelLabel}</h3>
+            <div className="best-model-stats">
+              <span>Качество поиска: <b>{runState.bestTrials[0].qualityScore}%</b></span>
+              <span>Средняя ошибка: <b>{runState.bestTrials[0].averageError} п.п.</b></span>
+              <span>Разделение good/low: <b>{runState.bestTrials[0].separation} п.п.</b></span>
+              <span>Видео: <b>{runState.bestTrials[0].summary.videosCompared}</b></span>
+            </div>
+          </div>
+          <div className="trial-list">
+            <div className="trial-list-head">
+              <strong>История перебора моделей</strong>
+              <span>Порядок запуска: {(runState.executionOrder || selectedModels).map((id) => comparisonModels[id]?.title || id).join(" → ")}</span>
+            </div>
+            {runState.bestTrials.map((trial, index) => (
+              <div className="trial-item" key={trial.id}>
+                <b>{index + 1}. {trial.modelLabel}</b>
+                <span>
+                  качество {trial.qualityScore}% · ошибка {trial.averageError} · good{" "}
+                  {trial.summary.goodAverage == null ? "-" : `${trial.summary.goodAverage}%`} · low{" "}
+                  {trial.summary.lowAverage == null ? "-" : `${trial.summary.lowAverage}%`} · self{" "}
+                  {trial.summary.selfAverage == null ? "-" : `${trial.summary.selfAverage}%`}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -4930,6 +5233,7 @@ function App() {
   const { landmarker, scanLandmarker, error } = usePoseLandmarker(mediaPipeSettings);
   const leftVideoRef = useRef(null);
   const rightVideoRef = useRef(null);
+  const autonomousVideoRef = useRef(null);
   const analysisRafRef = useRef(0);
   const mediaPipeTimestampRef = useRef(0);
   const [leftPose, setLeftPose] = useState(null);
@@ -4948,6 +5252,17 @@ function App() {
   const [runState, setRunState] = useState({ status: "idle", progress: 0, result: null, message: "" });
   const [expectedScore, setExpectedScore] = useState("");
   const [labHistory, setLabHistory] = useState(() => loadLabHistory());
+  const [autonomousReferenceFile, setAutonomousReferenceFile] = useState(null);
+  const [autonomousCandidateFiles, setAutonomousCandidateFiles] = useState([]);
+  const [autonomousSelectedModels, setAutonomousSelectedModels] = useState(["joint-areas", "zone-grid", "trajectory-drawing", "2026-07-13"]);
+  const [autonomousRunState, setAutonomousRunState] = useState({
+    status: "idle",
+    progress: 0,
+    message: "",
+    results: [],
+    bestTrials: [],
+    executionOrder: []
+  });
   const activeSpecs = useMemo(() => activeAngleSpecs(mediaPipeSettings.regions), [mediaPipeSettings.regions]);
   const activeSync = useMemo(() => effectiveSync(sync, manualSync), [sync, manualSync]);
   const motionCapComparison = useMemo(
@@ -5302,6 +5617,171 @@ function App() {
     }
   }
 
+  function toggleAutonomousModel(modelId) {
+    setAutonomousSelectedModels((items) =>
+      items.includes(modelId) ? items.filter((item) => item !== modelId) : [...items, modelId]
+    );
+  }
+
+  async function scanAutonomousFile(file, progressLabel, onProgress) {
+    const video = autonomousVideoRef.current;
+    if (!video) throw new Error("Скрытый видео-сканер не готов.");
+    const url = await loadFileIntoVideo(video, file);
+    try {
+      const scan = await scanVideoPose(
+        video,
+        scanLandmarker,
+        (progress) => onProgress?.(`${progressLabel}: скан ${progress}%`),
+        null,
+        mediaPipeSettings
+      );
+      let audio = null;
+      try {
+        audio = await analyzeAudioFile(file);
+      } catch {
+        audio = null;
+      }
+      return { scan, audio };
+    } finally {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  async function runAutonomousEnsembleLab() {
+    if (autonomousRunState.status === "running") return;
+    if (!autonomousReferenceFile || !autonomousCandidateFiles.length || !autonomousSelectedModels.length) {
+      setAutonomousRunState((previous) => ({
+        ...previous,
+        status: "error",
+        message: "Выберите эталон, хотя бы одно видео ученика и одну модель."
+      }));
+      return;
+    }
+
+    const executionOrder = shuffledItems(autonomousSelectedModels);
+    const totalWork = 1 + autonomousCandidateFiles.length * (1 + executionOrder.length);
+    let completedWork = 0;
+    const updateProgress = (message) => {
+      setAutonomousRunState((previous) => ({
+        ...previous,
+        status: "running",
+        progress: Math.min(99, Math.round((completedWork / Math.max(1, totalWork)) * 100)),
+        message
+      }));
+    };
+
+    setAutonomousRunState({
+      status: "running",
+      progress: 0,
+      message: "Сканирую эталон педагога.",
+      results: [],
+      bestTrials: [],
+      executionOrder
+    });
+    try {
+      const reference = await scanAutonomousFile(autonomousReferenceFile, "Эталон", (message) => updateProgress(message));
+      completedWork += 1;
+      const results = [];
+
+      for (const candidateFile of autonomousCandidateFiles) {
+        updateProgress(`Сканирую ${candidateFile.name}.`);
+        const candidate = await scanAutonomousFile(candidateFile, candidateFile.name, (message) => updateProgress(message));
+        completedWork += 1;
+
+        const runSync =
+          reference.audio && candidate.audio
+            ? estimateAudioSync(reference.audio, candidate.audio)
+            : { ready: false, offsetSeconds: 0, confidence: 0, message: "Аудио-синхронизация недоступна." };
+        const modelScores = {};
+        const modelDetails = {};
+
+        for (const modelId of executionOrder) {
+          updateProgress(`${candidateFile.name}: модель "${comparisonModels[modelId]?.title || modelId}".`);
+          try {
+            const result = await compareByModelAsync(
+              modelId,
+              reference.scan,
+              candidate.scan,
+              runSync,
+              mediaPipeSettings.regions,
+              reference.audio,
+              mediaPipeSettings,
+              hybridMethods
+            );
+            modelScores[modelId] = result?.ready ? result.score : null;
+            modelDetails[modelId] = {
+              ready: Boolean(result?.ready),
+              score: result?.score ?? null,
+              bestScore: result?.bestScore ?? null,
+              worstScore: result?.worstScore ?? null,
+              framesCompared: result?.framesCompared ?? 0,
+              verdict: result?.verdict || "",
+              suggestions: result?.suggestions || []
+            };
+          } catch (err) {
+            modelScores[modelId] = null;
+            modelDetails[modelId] = {
+              ready: false,
+              error: err instanceof Error ? err.message : String(err)
+            };
+          }
+          completedWork += 1;
+        }
+
+        const caseInfo = inferAutonomousCase(candidateFile.name);
+        const ensembleScore = autonomousEnsembleScore(modelScores);
+        const item = {
+          id: crypto.randomUUID(),
+          createdAt: new Date().toISOString(),
+          referenceFileName: autonomousReferenceFile.name,
+          fileName: candidateFile.name,
+          caseType: caseInfo.type,
+          caseLabel: caseInfo.label,
+          target: caseInfo.target,
+          ensembleScore,
+          recommendation: autonomousRecommendation(caseInfo.type, ensembleScore, modelScores),
+          modelScores,
+          modelDetails,
+          sync: runSync,
+          mediaPipeSettings,
+          appVersion,
+          selectedModels: executionOrder
+        };
+        results.push(item);
+        const bestTrials = buildAutonomousTrials(results, autonomousSelectedModels);
+        setAutonomousRunState({
+          status: "running",
+          progress: Math.min(99, Math.round((completedWork / Math.max(1, totalWork)) * 100)),
+          message: `${candidateFile.name}: готово.`,
+          results: [...results],
+          bestTrials,
+          executionOrder
+        });
+        await yieldToBrowser();
+      }
+
+      const bestTrials = buildAutonomousTrials(results, autonomousSelectedModels);
+      setAutonomousRunState({
+        status: "done",
+        progress: 100,
+        message: `Автономный анализ завершен: ${results.length} видео, ${executionOrder.length} моделей. Лучший вариант: ${bestTrials[0]?.modelLabel || "не найден"}.`,
+        results,
+        bestTrials,
+        executionOrder
+      });
+    } catch (err) {
+      setAutonomousRunState((previous) => ({
+        ...previous,
+        status: "error",
+        progress: 0,
+        message: `Автономная лаборатория остановилась: ${err instanceof Error ? err.message : String(err)}`
+      }));
+    }
+  }
+
   function saveLabExample(
     resultOverride = null,
     syncOverride = sync,
@@ -5452,6 +5932,35 @@ function App() {
           });
         }}
       />
+
+      <AutonomousEnsembleLab
+        referenceFile={autonomousReferenceFile}
+        candidateFiles={autonomousCandidateFiles}
+        selectedModels={autonomousSelectedModels}
+        runState={autonomousRunState}
+        onReferenceChange={(file) => {
+          setAutonomousReferenceFile(file);
+          setAutonomousRunState({ status: "idle", progress: 0, message: "", results: [], bestTrials: [], executionOrder: [] });
+        }}
+        onCandidatesChange={(files) => {
+          setAutonomousCandidateFiles(files);
+          setAutonomousRunState({ status: "idle", progress: 0, message: "", results: [], bestTrials: [], executionOrder: [] });
+        }}
+        onToggleModel={toggleAutonomousModel}
+        onRun={runAutonomousEnsembleLab}
+        onExport={() =>
+          downloadJson("dmpa-autonomous-ensemble.json", {
+            appVersion,
+            referenceFileName: autonomousReferenceFile?.name || "",
+            candidateFileNames: autonomousCandidateFiles.map((file) => file.name),
+            selectedModels: autonomousSelectedModels,
+            executionOrder: autonomousRunState.executionOrder,
+            bestTrials: autonomousRunState.bestTrials,
+            results: autonomousRunState.results
+          })
+        }
+      />
+      <video ref={autonomousVideoRef} className="hidden-batch-video" muted playsInline />
 
       {error && <div className="global-error">{error}</div>}
 
