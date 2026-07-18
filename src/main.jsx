@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.2",
-  versionLabel: "v0.6.2",
-  build: "zones-drawing-bone-length-normalization-2026-07-19"
+  version: "0.6.3",
+  versionLabel: "v0.6.3",
+  build: "zones-drawing-visualization-2026-07-19"
 };
 
 const captureEngines = {
@@ -176,9 +176,9 @@ const comparisonModels = {
   },
   "zones-drawing": {
     id: "zones-drawing",
-    version: "0.1.1",
-    versionLabel: "v0.1.1",
-    algorithmBuild: "joint-zones-trajectory-bone-normalized-2026-07-19",
+    version: "0.1.2",
+    versionLabel: "v0.1.2",
+    algorithmBuild: "joint-zones-trajectory-bone-normalized-visualized-2026-07-19",
     name: "Области + Рисунок",
     title: "Области + Рисунок",
     shortTitle: "9. Области + Рисунок",
@@ -4024,6 +4024,220 @@ function ElasticDanceViewer({ leftScan, rightScan, sync, comparison, regions, en
   );
 }
 
+function ZonesDrawingViewer({ leftScan, rightScan, sync, comparison, enabled, hybridMethods }) {
+  const canvasRef = useRef(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const methods = normalizeHybridMethodSettings(hybridMethods);
+  const pairs = useMemo(() => {
+    if (!enabled || !leftScan?.frames?.length || !rightScan?.frames?.length) return [];
+    const allPairs = synchronizedAngleFramePairs(leftScan, rightScan, sync?.ready ? sync.offsetSeconds : 0).pairs
+      .map((pair) => ({ ...pair, fitted: fittedPairLandmarks(pair, leftScan, rightScan) }))
+      .filter((pair) => pair.fitted?.left?.length && pair.fitted?.right?.length);
+    const stride = Math.max(1, Math.ceil(allPairs.length / maxOverlayPreviewFrames));
+    return allPairs.filter((_, index) => index % stride === 0);
+  }, [enabled, leftScan, rightScan, sync]);
+  const pair = pairs[currentIndex] || null;
+  const trajectoryPairs = useMemo(() => {
+    if (!pair) return [];
+    const start = pair.leftTime - 1;
+    const end = pair.leftTime + 1;
+    return pairs.filter((item) => item.leftTime >= start && item.leftTime <= end);
+  }, [pair, pairs]);
+
+  useEffect(() => {
+    setCurrentIndex(0);
+    setIsPlaying(false);
+  }, [pairs.length]);
+
+  useEffect(() => {
+    if (!enabled || !isPlaying || pairs.length < 2) return undefined;
+    const timer = window.setInterval(() => {
+      setCurrentIndex((index) => (index + 1) % pairs.length);
+    }, 180);
+    return () => window.clearInterval(timer);
+  }, [enabled, isPlaying, pairs.length]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.fillStyle = "#101827";
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    drawSkeletonGrid(ctx, rect.width, rect.height);
+
+    if (pair) {
+      drawZonesDrawingScene(ctx, pair, trajectoryPairs, rect.width, rect.height, methods);
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 13px Inter, sans-serif";
+      ctx.fillText(`Области + Рисунок: эталон ${formatSeconds(pair.leftTime, 2)} / правое ${formatSeconds(pair.rightTime, 2)}`, 14, 24);
+    } else {
+      ctx.fillStyle = "#d8e8fa";
+      ctx.font = "700 15px Inter, sans-serif";
+      ctx.fillText("Запустите полный анализ модели «Области + Рисунок», чтобы увидеть зоны и траектории.", 14, 28);
+    }
+  }, [methods.drawing, methods.zones, pair, trajectoryPairs]);
+
+  const frameScore = pair ? compareZoneFrameScore(pair).score : null;
+  const modelRows = (comparison?.rows || []).filter((row) => String(row.id || "").startsWith("zones-drawing")).slice(0, 6);
+
+  return (
+    <section className={`skeleton-lab zones-drawing-lab ${enabled ? "" : "hidden"}`}>
+      <div className="sync-header">
+        <div>
+          <p className="eyebrow">Zone + Drawing Lab</p>
+          <h2>Визуализация модели «Области + Рисунок»</h2>
+        </div>
+        <div className="legend">
+          <span>
+            <i className="skeleton-left" /> эталон
+          </span>
+          <span>
+            <i className="skeleton-right" /> правое видео
+          </span>
+          <span>
+            <i className="zone-color" /> области
+          </span>
+          <span>
+            <i className="trajectory-color" /> рисунки
+          </span>
+        </div>
+      </div>
+      <canvas ref={canvasRef} className="skeleton-canvas zones-drawing-canvas" />
+      <div className="overlay-controls">
+        <button type="button" onClick={() => setIsPlaying((value) => !value)} disabled={!pairs.length}>
+          {isPlaying ? <Pause size={17} /> : <Play size={17} />}
+          {isPlaying ? "Пауза" : "Play"}
+        </button>
+        <button type="button" onClick={() => setCurrentIndex((index) => Math.max(0, index - 1))} disabled={!pairs.length}>
+          Назад
+        </button>
+        <input
+          type="range"
+          min="0"
+          max={Math.max(0, pairs.length - 1)}
+          step="1"
+          value={Math.min(currentIndex, Math.max(0, pairs.length - 1))}
+          onChange={(event) => {
+            setIsPlaying(false);
+            setCurrentIndex(Number(event.target.value));
+          }}
+          disabled={!pairs.length}
+        />
+        <button
+          type="button"
+          onClick={() => setCurrentIndex((index) => Math.min(Math.max(0, pairs.length - 1), index + 1))}
+          disabled={!pairs.length}
+        >
+          Вперед
+        </button>
+      </div>
+      <div className="overlay-meta">
+        <span>
+          Кадр {pairs.length ? currentIndex + 1 : 0}/{pairs.length}
+        </span>
+        <span>Эталон: {pair ? formatSeconds(pair.leftTime, 2) : "-"}</span>
+        <span>Правое: {pair ? formatSeconds(pair.rightTime, 2) : "-"}</span>
+        <span>Попадание в области: {frameScore != null ? `${clampPercent(frameScore)}%` : "-"}</span>
+        <span>Итог модели: {comparison?.ready ? `${comparison.score}%` : "-"}</span>
+      </div>
+      {modelRows.length > 0 && (
+        <div className="elastic-metrics">
+          {modelRows.map((row) => (
+            <span key={row.id}>
+              {row.title}: <b>{row.score}%</b>
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="sync-note">
+        Круги показывают допустимые области вокруг суставов эталона. Линии показывают рисунок движения активных точек за короткий фрагмент
+        вокруг выбранного кадра. Правый скелет предварительно подгоняется по корпусу и длинам костей эталона.
+      </p>
+    </section>
+  );
+}
+
+function drawZonesDrawingScene(ctx, pair, trajectoryPairs, width, height, methods) {
+  const left = pair.fitted.left;
+  const right = pair.fitted.right;
+  const project = normalizedSkeletonProjector(width, height);
+  if (methods.zones) drawJointZones(ctx, left, right, project);
+  if (methods.drawing) drawJointTrajectories(ctx, trajectoryPairs, project);
+  drawSkeletonDifferences(ctx, left, right, width, height, { arms: true, torso: true, legs: true });
+  drawNormalizedSkeleton(ctx, left, width, height, "#28d7a4", { arms: true, torso: true, legs: true });
+  drawNormalizedSkeleton(ctx, right, width, height, "#55a4ff", { arms: true, torso: true, legs: true });
+}
+
+function normalizedSkeletonProjector(width, height) {
+  const centerX = width / 2;
+  const centerY = height * 0.52;
+  const scale = Math.min(width, height) * 0.22;
+  return {
+    scale,
+    point: (point) => ({ x: centerX + point.x * scale, y: centerY + point.y * scale })
+  };
+}
+
+function drawJointZones(ctx, leftLandmarks, rightLandmarks, project) {
+  for (const spec of zoneDrawingJointSpecs) {
+    const leftPoint = leftLandmarks?.[spec.id];
+    if (!leftPoint) continue;
+    const center = project.point(leftPoint);
+    const rightPoint = rightLandmarks?.[spec.id] ? project.point(rightLandmarks[spec.id]) : null;
+    const radius = spec.radius * project.scale;
+    const hit = rightPoint ? Math.hypot(center.x - rightPoint.x, center.y - rightPoint.y) <= radius : false;
+
+    ctx.beginPath();
+    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = hit ? "rgba(40, 215, 164, 0.12)" : "rgba(255, 103, 103, 0.14)";
+    ctx.strokeStyle = hit ? "rgba(40, 215, 164, 0.75)" : "rgba(255, 103, 103, 0.85)";
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawJointTrajectories(ctx, pairs, project) {
+  for (const spec of zoneDrawingJointSpecs) {
+    const leftPath = pairs.map((pair) => pair.fitted.left?.[spec.id]).filter(Boolean);
+    const rightPath = pairs.map((pair) => pair.fitted.right?.[spec.id]).filter(Boolean);
+    drawTrajectoryPath(ctx, leftPath, project, "rgba(40, 215, 164, 0.72)");
+    drawTrajectoryPath(ctx, rightPath, project, "rgba(85, 164, 255, 0.72)");
+  }
+}
+
+function drawTrajectoryPath(ctx, points, project, color) {
+  if (points.length < 2) return;
+  ctx.beginPath();
+  points.forEach((point, index) => {
+    const projected = project.point(point);
+    if (index === 0) ctx.moveTo(projected.x, projected.y);
+    else ctx.lineTo(projected.x, projected.y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.stroke();
+
+  const first = project.point(points[0]);
+  const last = project.point(points.at(-1));
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(first.x, first.y, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 function KeyPoseViewer({ comparison, enabled, regions }) {
   const moments = comparison?.poseMoments || [];
   return (
@@ -4859,6 +5073,15 @@ function App() {
         regions={mediaPipeSettings.regions}
         enabled={(comparisonModel === "2026-07-12" || comparisonModel === "2026-07-13") && Boolean(runState.result?.ready)}
         modelId={comparisonModel === "2026-07-13" ? "2026-07-13" : "2026-07-12"}
+      />
+
+      <ZonesDrawingViewer
+        leftScan={leftScan}
+        rightScan={rightScan}
+        sync={activeSync}
+        comparison={comparison}
+        enabled={comparisonModel === "zones-drawing" && Boolean(runState.result?.ready)}
+        hybridMethods={hybridMethods}
       />
 
       <section className="analysis-panel">

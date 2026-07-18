@@ -871,6 +871,14 @@ h3 {
   background: #ff6b6b;
 }
 
+.zone-color {
+  background: #ff6b6b;
+}
+
+.trajectory-color {
+  background: #f7c948;
+}
+
 .waveform-canvas {
   border: 1px solid #dbe4ef;
   border-radius: 8px;
