@@ -332,16 +332,22 @@ h3 {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.model-tabs button {
+.model-tabs .model-tab-card {
   align-items: flex-start;
   background: #f6f9fd;
+  border: 1px solid #d8e3ef;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
   flex-direction: column;
+  gap: 8px;
   justify-content: flex-start;
   min-height: 120px;
+  padding: 14px;
   text-align: left;
 }
 
-.model-tabs button.selected {
+.model-tabs .model-tab-card.selected {
   background: #eaf4ff;
   border-color: #0f6fdd;
   box-shadow: 0 10px 24px rgba(15, 111, 221, 0.14);
@@ -356,6 +362,35 @@ h3 {
   font-size: 13px;
   font-weight: 600;
   line-height: 1.45;
+}
+
+.hybrid-method-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  width: 100%;
+}
+
+.hybrid-method-toggles label {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cfe0f1;
+  border-radius: 8px;
+  color: #34495e;
+  cursor: pointer;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  gap: 7px;
+  padding: 8px 10px;
+}
+
+.hybrid-method-toggles input {
+  accent-color: #0f6fdd;
+  height: 16px;
+  margin: 0;
+  width: 16px;
 }
 
 .settings-title {

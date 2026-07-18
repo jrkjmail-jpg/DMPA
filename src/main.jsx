@@ -19,14 +19,15 @@ const wasmBase = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-r
 const labHistoryKey = "dmpa.lab.history.v1";
 const mediaPipeSettingsKey = "dmpa.mediapipe.settings.v1";
 const captureEngineKey = "dmpa.capture.engine.v1";
+const hybridMethodSettingsKey = "dmpa.hybrid.methods.v1";
 const maxStoredLabItems = 20;
 const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.0",
-  versionLabel: "v0.6.0",
-  build: "motioncap-lab-freemocap-import-2026-07-18"
+  version: "0.6.1",
+  versionLabel: "v0.6.1",
+  build: "zones-drawing-method-switches-2026-07-19"
 };
 
 const captureEngines = {
@@ -172,8 +173,35 @@ const comparisonModels = {
     shortTitle: "8. OpenAI эксперт",
     description:
       "Серверная AI-модель: требует доказательство выполнения хореографической фразы, отделяет качество скана от качества танца и строго ограничивает оценку при отсутствии движения."
+  },
+  "zones-drawing": {
+    id: "zones-drawing",
+    version: "0.1.0",
+    versionLabel: "v0.1.0",
+    algorithmBuild: "joint-zones-trajectory-drawing-2026-07-19",
+    name: "Области + Рисунок",
+    title: "Области + Рисунок",
+    shortTitle: "9. Области + Рисунок",
+    description:
+      "Экспериментальная модель: внутри одной карточки можно включать зоны вокруг суставов и рисунок траекторий активных точек."
   }
 };
+
+const defaultHybridMethodSettings = {
+  zones: true,
+  drawing: true
+};
+
+const zoneDrawingJointSpecs = [
+  { id: 15, key: "leftWrist", title: "Левая кисть", group: "arms", radius: 0.28 },
+  { id: 16, key: "rightWrist", title: "Правая кисть", group: "arms", radius: 0.28 },
+  { id: 13, key: "leftElbow", title: "Левый локоть", group: "arms", radius: 0.22 },
+  { id: 14, key: "rightElbow", title: "Правый локоть", group: "arms", radius: 0.22 },
+  { id: 25, key: "leftKnee", title: "Левое колено", group: "legs", radius: 0.24 },
+  { id: 26, key: "rightKnee", title: "Правое колено", group: "legs", radius: 0.24 },
+  { id: 27, key: "leftAnkle", title: "Левая стопа", group: "legs", radius: 0.28 },
+  { id: 28, key: "rightAnkle", title: "Правая стопа", group: "legs", radius: 0.28 }
+];
 
 const runnableComparisonModelIds = Object.keys(comparisonModels).filter((id) => id !== "all-auto");
 
@@ -504,19 +532,265 @@ function compareScans(leftScan, rightScan, sync, regions = defaultMediaPipeSetti
   };
 }
 
-function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio) {
+function fittedPairLandmarks(pair, leftScan, rightScan) {
+  const left = normalizeSkeleton(pair.leftFrame.landmarks, leftScan?.video?.aspect);
+  const right = normalizeSkeleton(pair.rightFrame.landmarks, rightScan?.video?.aspect);
+  if (!left?.length || !right?.length) return null;
+  return {
+    left,
+    right: fitNormalizedSkeletonToReference(left, right)
+  };
+}
+
+function compareZonesDrawingScans(leftScan, rightScan, sync, hybridMethods = defaultHybridMethodSettings) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null);
+
+  const methods = normalizeHybridMethodSettings(hybridMethods);
+  const offset = sync?.ready ? sync.offsetSeconds : 0;
+  const anglePairs = synchronizedAngleFramePairs(leftScan, rightScan, offset);
+  const pairs = anglePairs.pairs
+    .map((pair) => ({ ...pair, fitted: fittedPairLandmarks(pair, leftScan, rightScan) }))
+    .filter((pair) => pair.fitted?.left?.length && pair.fitted?.right?.length);
+
+  if (!pairs.length) return comparePoseFrames(null, null);
+
+  const methodResults = [];
+  if (methods.zones) methodResults.push(compareJointZonesPairs(pairs));
+  if (methods.drawing) methodResults.push(compareTrajectoryDrawingPairs(pairs));
+
+  const scoreWeight = methodResults.reduce((sum, item) => sum + item.weight, 0);
+  const score = clampPercent(methodResults.reduce((sum, item) => sum + item.score * item.weight, 0) / Math.max(1, scoreWeight));
+  const arms = clampPercent(averageNumbers(methodResults.map((item) => item.bodyParts?.arms).filter(Number.isFinite)));
+  const legs = clampPercent(averageNumbers(methodResults.map((item) => item.bodyParts?.legs).filter(Number.isFinite)));
+  const rows = methodResults.flatMap((item) => item.rows);
+  const suggestions = methodResults.flatMap((item) => item.suggestions).slice(0, 5);
+  const frameScores = pairs.map((pair) => compareZoneFrameScore(pair).score).filter(Number.isFinite);
+  const worstFrame = pairs
+    .map((pair) => ({ pair, score: compareZoneFrameScore(pair).score }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((a, b) => a.score - b.score)[0];
+
+  return {
+    ready: true,
+    method: "Области + Рисунок",
+    score,
+    finalScore: score,
+    rows,
+    suggestions,
+    framesCompared: pairs.length,
+    bestScore: clampPercent(Math.max(...frameScores)),
+    worstScore: clampPercent(Math.min(...frameScores)),
+    durationCompared: Number((pairs.at(-1).leftTime - pairs[0].leftTime).toFixed(1)),
+    worstMoment: worstFrame
+      ? {
+          leftTime: worstFrame.pair.leftTime,
+          rightTime: worstFrame.pair.rightTime,
+          score: clampPercent(worstFrame.score)
+        }
+      : null,
+    bodyParts: {
+      arms,
+      legs,
+      torso: 100,
+      head: 0,
+      rhythm: sync?.ready ? clampPercent((sync.confidence || 0) * 100) : 75
+    },
+    diagnostics: {
+      hybridMethods: methods,
+      zoneDrawingJoints: zoneDrawingJointSpecs.length,
+      trackingOutliersSkipped: anglePairs.skipped,
+      referenceOutliersSkipped: anglePairs.leftSkipped,
+      userOutliersSkipped: anglePairs.rightSkipped
+    },
+    verdict: verdictForScore(score, suggestions)
+  };
+}
+
+function compareJointZonesPairs(pairs) {
+  const scores = [];
+  const groupScores = { arms: [], legs: [] };
+  const jointAverages = new Map();
+
+  for (const pair of pairs) {
+    for (const spec of zoneDrawingJointSpecs) {
+      const leftPoint = pair.fitted.left?.[spec.id];
+      const rightPoint = pair.fitted.right?.[spec.id];
+      const distance = pointDistance(leftPoint, rightPoint);
+      if (!Number.isFinite(distance)) continue;
+      const score = clampPercent(100 - (distance / spec.radius) * 100);
+      scores.push(score);
+      groupScores[spec.group]?.push(score);
+      const current = jointAverages.get(spec.id) || { spec, scores: [] };
+      current.scores.push(score);
+      jointAverages.set(spec.id, current);
+    }
+  }
+
+  const jointRows = Array.from(jointAverages.values())
+    .map(({ spec, scores: itemScores }) => rowPercent(`zones-drawing-zone-${spec.key}`, `Область: ${spec.title}`, averageNumbers(itemScores)))
+    .sort((a, b) => a.score - b.score);
+  const worst = jointRows.slice(0, 3);
+
+  return {
+    id: "zones",
+    weight: 0.45,
+    score: clampPercent(averageNumbers(scores)),
+    bodyParts: {
+      arms: averageNumbers(groupScores.arms),
+      legs: averageNumbers(groupScores.legs)
+    },
+    rows: [
+      rowPercent("zones-drawing-zones", "Области суставов", averageNumbers(scores)),
+      rowPercent("zones-drawing-zones-arms", "Области рук", averageNumbers(groupScores.arms)),
+      rowPercent("zones-drawing-zones-legs", "Области ног", averageNumbers(groupScores.legs)),
+      ...worst
+    ],
+    suggestions: worst.map((row) => `${row.title.replace("Область: ", "")}: чаще всего выходит из своей зоны.`)
+  };
+}
+
+function compareTrajectoryDrawingPairs(pairs) {
+  const segmentSeconds = 2;
+  const startTime = pairs[0]?.leftTime || 0;
+  const segmentMap = new Map();
+  for (const pair of pairs) {
+    const segmentId = Math.floor(((pair.leftTime || 0) - startTime) / segmentSeconds);
+    if (!segmentMap.has(segmentId)) segmentMap.set(segmentId, []);
+    segmentMap.get(segmentId).push(pair);
+  }
+
+  const scores = [];
+  const groupScores = { arms: [], legs: [] };
+  const rows = [];
+
+  for (const spec of zoneDrawingJointSpecs) {
+    const jointScores = [];
+    for (const segmentPairs of segmentMap.values()) {
+      const score = compareTrajectorySegment(segmentPairs, spec.id);
+      if (!Number.isFinite(score)) continue;
+      jointScores.push(score);
+      scores.push(score);
+      groupScores[spec.group]?.push(score);
+    }
+    if (jointScores.length) {
+      rows.push(rowPercent(`zones-drawing-trajectory-${spec.key}`, `Рисунок: ${spec.title}`, averageNumbers(jointScores)));
+    }
+  }
+
+  const worst = rows.sort((a, b) => a.score - b.score).slice(0, 3);
+  return {
+    id: "drawing",
+    weight: 0.55,
+    score: clampPercent(averageNumbers(scores)),
+    bodyParts: {
+      arms: averageNumbers(groupScores.arms),
+      legs: averageNumbers(groupScores.legs)
+    },
+    rows: [
+      rowPercent("zones-drawing-trajectory", "Рисунок движения", averageNumbers(scores)),
+      rowPercent("zones-drawing-trajectory-arms", "Рисунок рук", averageNumbers(groupScores.arms)),
+      rowPercent("zones-drawing-trajectory-legs", "Рисунок ног", averageNumbers(groupScores.legs)),
+      ...worst
+    ],
+    suggestions: worst.map((row) => `${row.title.replace("Рисунок: ", "")}: траектория отличается от эталона.`)
+  };
+}
+
+function compareZoneFrameScore(pair) {
+  const scores = zoneDrawingJointSpecs
+    .map((spec) => {
+      const distance = pointDistance(pair.fitted.left?.[spec.id], pair.fitted.right?.[spec.id]);
+      return Number.isFinite(distance) ? 100 - (distance / spec.radius) * 100 : null;
+    })
+    .filter(Number.isFinite);
+  return { score: averageNumbers(scores) };
+}
+
+function compareTrajectorySegment(segmentPairs, jointId) {
+  const leftPath = segmentPairs.map((pair) => pair.fitted.left?.[jointId]).filter(Boolean);
+  const rightPath = segmentPairs.map((pair) => pair.fitted.right?.[jointId]).filter(Boolean);
+  if (leftPath.length < 3 || rightPath.length < 3) return null;
+
+  const count = Math.min(leftPath.length, rightPath.length);
+  const leftSample = resamplePath(leftPath, count);
+  const rightSample = resamplePath(rightPath, count);
+  const leftLength = pathLength(leftSample);
+  const rightLength = pathLength(rightSample);
+  const movement = Math.max(leftLength, rightLength);
+  if (movement < 0.08) return null;
+
+  const leftNormalized = normalizeTrajectory(leftSample);
+  const rightNormalized = normalizeTrajectory(rightSample);
+  const shapeDistance = averageNumbers(leftNormalized.map((point, index) => pointDistance(point, rightNormalized[index])));
+  const shapeScore = clampPercent(100 - shapeDistance * 80);
+  const lengthScore = clampPercent(100 - Math.abs(leftLength - rightLength) / Math.max(0.001, Math.max(leftLength, rightLength)) * 100);
+  const directionScore = trajectoryDirectionScore(leftSample, rightSample);
+  return clampPercent(shapeScore * 0.58 + directionScore * 0.24 + lengthScore * 0.18);
+}
+
+function resamplePath(points, count) {
+  if (points.length === count) return points;
+  return Array.from({ length: count }, (_, index) => {
+    const sourceIndex = (index / Math.max(1, count - 1)) * (points.length - 1);
+    const low = Math.floor(sourceIndex);
+    const high = Math.min(points.length - 1, Math.ceil(sourceIndex));
+    const t = sourceIndex - low;
+    const a = points[low];
+    const b = points[high];
+    return {
+      x: a.x + (b.x - a.x) * t,
+      y: a.y + (b.y - a.y) * t,
+      z: (a.z || 0) + ((b.z || 0) - (a.z || 0)) * t
+    };
+  });
+}
+
+function pathLength(points) {
+  let length = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    length += pointDistance(points[index - 1], points[index]) || 0;
+  }
+  return length;
+}
+
+function normalizeTrajectory(points) {
+  const origin = points[0];
+  const scale = Math.max(0.001, pathLength(points));
+  return points.map((point) => ({
+    x: (point.x - origin.x) / scale,
+    y: (point.y - origin.y) / scale,
+    z: ((point.z || 0) - (origin.z || 0)) / scale
+  }));
+}
+
+function trajectoryDirectionScore(leftPath, rightPath) {
+  const leftStart = leftPath[0];
+  const leftEnd = leftPath.at(-1);
+  const rightStart = rightPath[0];
+  const rightEnd = rightPath.at(-1);
+  const leftVector = { x: leftEnd.x - leftStart.x, y: leftEnd.y - leftStart.y };
+  const rightVector = { x: rightEnd.x - rightStart.x, y: rightEnd.y - rightStart.y };
+  const leftLength = Math.hypot(leftVector.x, leftVector.y);
+  const rightLength = Math.hypot(rightVector.x, rightVector.y);
+  if (leftLength < 0.001 || rightLength < 0.001) return 50;
+  const cosine = (leftVector.x * rightVector.x + leftVector.y * rightVector.y) / (leftLength * rightLength);
+  return clampPercent(((Math.max(-1, Math.min(1, cosine)) + 1) / 2) * 100);
+}
+
+function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio, hybridMethods = defaultHybridMethodSettings) {
   if (model === "openai-expert") return pendingOpenAiComparison();
   if (model === "overlay") return compareOverlayScans(leftScan, rightScan, sync, regions);
   if (model === "poses") return compareImpulsePoseScans(leftScan, rightScan, sync, regions, leftAudio);
   if (model === "2026-07-06") return compareScans20260706(leftScan, rightScan, sync);
   if (model === "2026-07-12") return compareScans20260712(leftScan, rightScan, sync);
   if (model === "2026-07-13") return compareScans20260713(leftScan, rightScan, sync);
+  if (model === "zones-drawing") return compareZonesDrawingScans(leftScan, rightScan, sync, hybridMethods);
   return compareScans(leftScan, rightScan, sync, regions);
 }
 
-async function compareByModelAsync(model, leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings) {
+async function compareByModelAsync(model, leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings, hybridMethods = defaultHybridMethodSettings) {
   if (model === "openai-expert") return compareScansOpenAiExpert(leftScan, rightScan, sync, regions, leftAudio, mediaPipeSettings);
-  return compareByModel(model, leftScan, rightScan, sync, regions, leftAudio);
+  return compareByModel(model, leftScan, rightScan, sync, regions, leftAudio, hybridMethods);
 }
 
 function pendingOpenAiComparison() {
@@ -1456,6 +1730,27 @@ function loadCaptureEngine() {
     return captureEngines[saved] ? saved : "mediapipe";
   } catch {
     return "mediapipe";
+  }
+}
+
+function normalizeHybridMethodSettings(settings) {
+  const next = {
+    ...defaultHybridMethodSettings,
+    ...(settings || {})
+  };
+  const normalized = {
+    zones: Boolean(next.zones),
+    drawing: Boolean(next.drawing)
+  };
+  if (!normalized.zones && !normalized.drawing) return { ...normalized, zones: true };
+  return normalized;
+}
+
+function loadHybridMethodSettings() {
+  try {
+    return normalizeHybridMethodSettings(JSON.parse(localStorage.getItem(hybridMethodSettingsKey) || "null"));
+  } catch {
+    return defaultHybridMethodSettings;
   }
 }
 
@@ -2910,7 +3205,11 @@ function MediaPipeSettingsPanel({ settings, onChange, isReady }) {
   );
 }
 
-function ComparisonModelPanel({ model, onChange }) {
+function ComparisonModelPanel({ model, onChange, hybridMethods, onHybridMethodsChange }) {
+  const updateHybridMethod = (key, checked) => {
+    onHybridMethodsChange((previous) => normalizeHybridMethodSettings({ ...previous, [key]: checked }));
+  };
+
   return (
     <section className="comparison-model-panel">
       <div className="settings-title">
@@ -2922,12 +3221,45 @@ function ComparisonModelPanel({ model, onChange }) {
       </div>
       <div className="model-tabs">
         {Object.entries(comparisonModels).map(([key, item]) => (
-          <button type="button" className={model === key ? "selected" : ""} onClick={() => onChange(key)} key={key}>
+          <div
+            className={model === key ? "model-tab-card selected" : "model-tab-card"}
+            key={key}
+            role="button"
+            tabIndex="0"
+            onClick={() => onChange(key)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") onChange(key);
+            }}
+          >
             <strong>
               {item.shortTitle} {item.versionLabel ? `· ${item.versionLabel}` : ""}
             </strong>
             <span>{item.description}</span>
-          </button>
+            {key === "zones-drawing" && (
+              <div
+                className="hybrid-method-toggles"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={hybridMethods.zones}
+                    onChange={(event) => updateHybridMethod("zones", event.target.checked)}
+                  />
+                  Области
+                </label>
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={hybridMethods.drawing}
+                    onChange={(event) => updateHybridMethod("drawing", event.target.checked)}
+                  />
+                  Рисунок движения
+                </label>
+              </div>
+            )}
+          </div>
         ))}
       </div>
     </section>
@@ -3804,6 +4136,7 @@ function App() {
     const savedModel = localStorage.getItem(comparisonModelKey);
     return comparisonModels[savedModel] ? savedModel : "angles";
   });
+  const [hybridMethods, setHybridMethods] = useState(() => loadHybridMethodSettings());
   const { landmarker, scanLandmarker, error } = usePoseLandmarker(mediaPipeSettings);
   const leftVideoRef = useRef(null);
   const rightVideoRef = useRef(null);
@@ -3852,8 +4185,9 @@ function App() {
         rightPose ? { frames: [{ ...rightPose, timestamp: Math.round((rightPose.time || 0) * 1000) }] } : null
       );
     }
+    if (comparisonModel === "zones-drawing") return compareZonesDrawingScans(leftScan, rightScan, activeSync, hybridMethods);
     return comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions);
-  }, [comparisonModel, leftPose, rightPose, mediaPipeSettings.regions]);
+  }, [activeSync, comparisonModel, hybridMethods, leftPose, leftScan, mediaPipeSettings.regions, rightPose, rightScan]);
   const comparison = runState.result || (leftScan?.frames?.length && rightScan?.frames?.length ? pendingFullRunComparison() : liveComparison);
   const confidence = Math.round(
     leftScan?.frames?.length || rightScan?.frames?.length
@@ -3910,6 +4244,14 @@ function App() {
       console.warn("Не удалось сохранить выбранную модель сравнения.", err);
     }
   }, [comparisonModel]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(hybridMethodSettingsKey, JSON.stringify(hybridMethods));
+    } catch (err) {
+      console.warn("Не удалось сохранить методы гибридной модели.", err);
+    }
+  }, [hybridMethods]);
 
   const nextMediaPipeTimestamp = useCallback(() => {
     const now = performance.now();
@@ -4008,7 +4350,16 @@ function App() {
         rightVideoRef.current?.playAt(rightStart, soundMode === "right" || soundMode === "both")
       ]);
     } catch (err) {
-      const result = await compareByModelAsync(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio, mediaPipeSettings);
+      const result = await compareByModelAsync(
+        comparisonModel,
+        leftScan,
+        rightScan,
+        playbackSync,
+        mediaPipeSettings.regions,
+        leftAudio,
+        mediaPipeSettings,
+        hybridMethods
+      );
       saveLabExample(result, playbackSync, "auto");
       setRunState({
         status: "done",
@@ -4034,7 +4385,16 @@ function App() {
           progress: 96,
           message: comparisonModel === "openai-expert" ? "Видео прогнано. OpenAI эксперт анализирует метрики и скелеты." : previous.message
         }));
-        compareByModelAsync(comparisonModel, leftScan, rightScan, playbackSync, mediaPipeSettings.regions, leftAudio, mediaPipeSettings)
+        compareByModelAsync(
+          comparisonModel,
+          leftScan,
+          rightScan,
+          playbackSync,
+          mediaPipeSettings.regions,
+          leftAudio,
+          mediaPipeSettings,
+          hybridMethods
+        )
           .then((result) => {
             saveLabExample(result, playbackSync, "auto");
             setRunState({
@@ -4113,7 +4473,16 @@ function App() {
         }));
         results.push({
           modelId,
-          result: await compareByModelAsync(modelId, freshLeftScan, freshRightScan, activeRunSync, mediaPipeSettings.regions, leftAudio, mediaPipeSettings)
+          result: await compareByModelAsync(
+            modelId,
+            freshLeftScan,
+            freshRightScan,
+            activeRunSync,
+            mediaPipeSettings.regions,
+            leftAudio,
+            mediaPipeSettings,
+            hybridMethods
+          )
         });
       }
 
@@ -4178,6 +4547,7 @@ function App() {
       comparisonModelVersionLabel: savedModelDetails.versionLabel,
       comparisonAlgorithmBuild: savedModelDetails.algorithmBuild,
       comparisonModelDetails: savedModelDetails,
+      hybridMethods: savedModel === "zones-drawing" ? normalizeHybridMethodSettings(hybridMethods) : null,
       mediaPipeSettings: {
         ...mediaPipeSettings,
         activeAngles: activeSpecs.map((spec) => ({
@@ -4279,6 +4649,8 @@ function App() {
 
       <ComparisonModelPanel
         model={comparisonModel}
+        hybridMethods={hybridMethods}
+        onHybridMethodsChange={setHybridMethods}
         onChange={(model) => {
           setComparisonModel(model);
           setRunState({
