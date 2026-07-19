@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.8",
-  versionLabel: "v0.6.8",
-  build: "history-model-run-metadata-2026-07-19"
+  version: "0.6.9",
+  versionLabel: "v0.6.9",
+  build: "activity-comparison-model-2026-07-19"
 };
 
 const captureEngines = {
@@ -206,6 +206,17 @@ const comparisonModels = {
     shortTitle: "11. Зоны",
     description:
       "Скелеты центрируются отдельно, длины костей приводятся к эталону, а точки сравниваются по попаданию в одинаковые квадраты сетки."
+  },
+  activity: {
+    id: "activity",
+    version: "0.1.0",
+    versionLabel: "v0.1.0",
+    algorithmBuild: "skeleton-activity-level-2026-07-19",
+    name: "Активность",
+    title: "Активность",
+    shortTitle: "12. Активность",
+    description:
+      "Оценивает уровень движения скелета: сколько и с какой амплитудой двигаются руки, ноги и корпус, а затем сравнивает активность правого видео с эталоном."
   }
 };
 
@@ -1064,6 +1075,293 @@ function normalizeTrajectory(points) {
   }));
 }
 
+const activityJointSpecs = [
+  { id: 11, key: "leftShoulder", title: "Левое плечо", group: "torso", weight: 0.7 },
+  { id: 12, key: "rightShoulder", title: "Правое плечо", group: "torso", weight: 0.7 },
+  { id: 13, key: "leftElbow", title: "Левый локоть", group: "arms", weight: 1 },
+  { id: 14, key: "rightElbow", title: "Правый локоть", group: "arms", weight: 1 },
+  { id: 15, key: "leftWrist", title: "Левая кисть", group: "arms", weight: 1.25 },
+  { id: 16, key: "rightWrist", title: "Правая кисть", group: "arms", weight: 1.25 },
+  { id: 23, key: "leftHip", title: "Левое бедро", group: "torso", weight: 0.7 },
+  { id: 24, key: "rightHip", title: "Правое бедро", group: "torso", weight: 0.7 },
+  { id: 25, key: "leftKnee", title: "Левое колено", group: "legs", weight: 1 },
+  { id: 26, key: "rightKnee", title: "Правое колено", group: "legs", weight: 1 },
+  { id: 27, key: "leftAnkle", title: "Левая стопа", group: "legs", weight: 1.15 },
+  { id: 28, key: "rightAnkle", title: "Правая стопа", group: "legs", weight: 1.15 }
+];
+
+function compareActivityScans(leftScan, rightScan, sync) {
+  if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null);
+
+  const offset = sync?.ready ? sync.offsetSeconds : 0;
+  const anglePairs = synchronizedAngleFramePairs(leftScan, rightScan, offset);
+  if (!anglePairs.pairs.length) return comparePoseFrames(null, null);
+
+  const leftProfile = buildActivityProfile(leftScan);
+  const rightProfile = buildActivityProfile({
+    ...rightScan,
+    frames: rightScan.frames.map((frame) => ({ ...frame, time: Number((frame.time - offset).toFixed(3)) }))
+  });
+  const frameActivity = buildPairedActivityFrames(anglePairs.pairs, leftScan, rightScan);
+  const activityMatch = activitySimilarityScore(leftProfile.total.activity, rightProfile.total.activity);
+  const amplitudeMatch = activitySimilarityScore(leftProfile.total.amplitudePercent, rightProfile.total.amplitudePercent);
+  const phraseMatch = clampPercent(averageNumbers(frameActivity.map((item) => item.score)));
+  const score = clampPercent(activityMatch * 0.52 + phraseMatch * 0.32 + amplitudeMatch * 0.16);
+  const groupMatches = ["arms", "legs", "torso"].map((group) => ({
+    group,
+    title: activityGroupTitle(group),
+    score: activitySimilarityScore(leftProfile.groups[group]?.activity || 0, rightProfile.groups[group]?.activity || 0)
+  }));
+  const weakestGroup = [...groupMatches].sort((a, b) => a.score - b.score)[0];
+  const worstFrame = [...frameActivity].sort((a, b) => a.score - b.score)[0] || null;
+  const frameScores = frameActivity.map((item) => item.score);
+
+  return {
+    ready: true,
+    method: "Активность",
+    score,
+    finalScore: score,
+    rows: [
+      rowPercent("activity-match-total", "Активность: совпадение уровня", score),
+      rowPercent("activity-reference-level", "Активность эталона", leftProfile.total.activity),
+      rowPercent("activity-user-level", "Активность правого видео", rightProfile.total.activity),
+      rowPercent("activity-arms", "Активность рук совпадает", groupMatches.find((item) => item.group === "arms")?.score),
+      rowPercent("activity-legs", "Активность ног совпадает", groupMatches.find((item) => item.group === "legs")?.score),
+      rowPercent("activity-torso", "Активность корпуса совпадает", groupMatches.find((item) => item.group === "torso")?.score),
+      rowPercent("activity-phrase", "Активность по фразе", phraseMatch)
+    ],
+    suggestions: activitySuggestions(leftProfile, rightProfile, weakestGroup),
+    framesCompared: anglePairs.pairs.length,
+    bestScore: frameScores.length ? clampPercent(Math.max(...frameScores)) : null,
+    worstScore: frameScores.length ? clampPercent(Math.min(...frameScores)) : null,
+    durationCompared: Number((anglePairs.pairs.at(-1).leftTime - anglePairs.pairs[0].leftTime).toFixed(1)),
+    worstMoment: worstFrame
+      ? {
+          leftTime: worstFrame.leftTime,
+          rightTime: worstFrame.rightTime,
+          score: worstFrame.score
+        }
+      : null,
+    bodyParts: {
+      arms: groupMatches.find((item) => item.group === "arms")?.score || 0,
+      legs: groupMatches.find((item) => item.group === "legs")?.score || 0,
+      torso: groupMatches.find((item) => item.group === "torso")?.score || 0,
+      head: 0,
+      rhythm: sync?.ready ? clampPercent((sync.confidence || 0) * 100) : 75
+    },
+    diagnostics: {
+      activityReference: leftProfile,
+      activityUser: rightProfile,
+      activityMatch,
+      amplitudeMatch,
+      phraseMatch,
+      trackingOutliersSkipped: anglePairs.skipped,
+      referenceOutliersSkipped: anglePairs.leftSkipped,
+      userOutliersSkipped: anglePairs.rightSkipped
+    },
+    verdict: activityVerdict(score, leftProfile.total.activity, rightProfile.total.activity, weakestGroup)
+  };
+}
+
+function buildActivityProfile(scan) {
+  const filtered = filterAngleScanFrames(scan);
+  const normalizedFrames = filtered.frames
+    .map((frame) => ({
+      frame,
+      landmarks: normalizeSkeleton(frame.landmarks, scan?.video?.aspect)
+    }))
+    .filter((item) => item.landmarks?.length);
+  const byJoint = new Map();
+  const groups = {
+    arms: emptyActivityBucket(),
+    legs: emptyActivityBucket(),
+    torso: emptyActivityBucket()
+  };
+
+  for (const spec of activityJointSpecs) byJoint.set(spec.id, { spec, speeds: [], points: [] });
+
+  for (const item of normalizedFrames) {
+    for (const spec of activityJointSpecs) {
+      const point = item.landmarks?.[spec.id];
+      if (point) byJoint.get(spec.id).points.push(point);
+    }
+  }
+
+  for (let index = 1; index < normalizedFrames.length; index += 1) {
+    const previous = normalizedFrames[index - 1];
+    const current = normalizedFrames[index];
+    const dt = Math.max(0.001, (current.frame.time || 0) - (previous.frame.time || 0));
+    if (dt > 1.15) continue;
+    for (const spec of activityJointSpecs) {
+      const distance = pointDistance(previous.landmarks?.[spec.id], current.landmarks?.[spec.id]);
+      if (!Number.isFinite(distance) || distance > 1.45) continue;
+      byJoint.get(spec.id).speeds.push(distance / dt);
+    }
+  }
+
+  const jointProfiles = Array.from(byJoint.values()).map(({ spec, speeds, points }) => {
+    const speed = trimmedAverage(speeds, 0.12);
+    const amplitude = activityPathAmplitude(points);
+    const speedPercent = activityRawToPercent(speed);
+    const amplitudePercent = activityRawToPercent(amplitude);
+    const activity = clampPercent(speedPercent * 0.72 + amplitudePercent * 0.28);
+    const profile = {
+      id: spec.id,
+      key: spec.key,
+      title: spec.title,
+      group: spec.group,
+      speed: Number(speed.toFixed(4)),
+      amplitude: Number(amplitude.toFixed(4)),
+      speedPercent,
+      amplitudePercent,
+      activity,
+      weight: spec.weight
+    };
+    const bucket = groups[spec.group];
+    bucket.weightedActivity += activity * spec.weight;
+    bucket.weightedAmplitudePercent += amplitudePercent * spec.weight;
+    bucket.weight += spec.weight;
+    return profile;
+  });
+
+  for (const bucket of Object.values(groups)) {
+    bucket.activity = clampPercent(bucket.weightedActivity / Math.max(0.001, bucket.weight));
+    bucket.amplitudePercent = clampPercent(bucket.weightedAmplitudePercent / Math.max(0.001, bucket.weight));
+  }
+
+  const totalWeight = jointProfiles.reduce((sum, item) => sum + item.weight, 0);
+  const totalActivity = jointProfiles.reduce((sum, item) => sum + item.activity * item.weight, 0) / Math.max(0.001, totalWeight);
+  const totalAmplitude = jointProfiles.reduce((sum, item) => sum + item.amplitudePercent * item.weight, 0) / Math.max(0.001, totalWeight);
+
+  return {
+    frames: normalizedFrames.length,
+    skipped: filtered.skipped,
+    duration: Number(((normalizedFrames.at(-1)?.frame.time || 0) - (normalizedFrames[0]?.frame.time || 0)).toFixed(2)),
+    total: {
+      activity: clampPercent(totalActivity),
+      amplitudePercent: clampPercent(totalAmplitude)
+    },
+    groups: {
+      arms: compactActivityBucket(groups.arms),
+      legs: compactActivityBucket(groups.legs),
+      torso: compactActivityBucket(groups.torso)
+    },
+    joints: jointProfiles
+  };
+}
+
+function buildPairedActivityFrames(pairs, leftScan, rightScan) {
+  const result = [];
+  let previous = null;
+  for (const pair of pairs) {
+    const fitted = fittedPairLandmarks(pair, leftScan, rightScan);
+    if (!fitted?.left?.length || !fitted?.right?.length) continue;
+    if (previous) {
+      const leftDt = Math.max(0.001, pair.leftTime - previous.leftTime);
+      const rightDt = Math.max(0.001, pair.rightTime - previous.rightTime);
+      const leftMovement = averageJointMovement(previous.fitted.left, fitted.left, leftDt);
+      const rightMovement = averageJointMovement(previous.fitted.right, fitted.right, rightDt);
+      result.push({
+        leftTime: pair.leftTime,
+        rightTime: pair.rightTime,
+        leftMovement,
+        rightMovement,
+        score: activitySimilarityScore(activityRawToPercent(leftMovement), activityRawToPercent(rightMovement))
+      });
+    }
+    previous = { ...pair, fitted };
+  }
+  return result;
+}
+
+function averageJointMovement(previous, current, dt) {
+  const movements = activityJointSpecs
+    .map((spec) => {
+      const distance = pointDistance(previous?.[spec.id], current?.[spec.id]);
+      return Number.isFinite(distance) && distance <= 1.45 ? (distance / dt) * spec.weight : null;
+    })
+    .filter(Number.isFinite);
+  return trimmedAverage(movements, 0.12);
+}
+
+function activityRawToPercent(value) {
+  if (!Number.isFinite(value) || value <= 0.004) return 0;
+  return clampPercent(100 * (1 - Math.exp(-value / 0.62)));
+}
+
+function activitySimilarityScore(referenceActivity, userActivity) {
+  const reference = clampPercent(referenceActivity);
+  const user = clampPercent(userActivity);
+  if (reference < 8 && user < 8) return 100;
+  if (reference >= 18 && user < 8) return clampPercent(12 + user * 1.4);
+  const ratioDiff = Math.abs(reference - user) / Math.max(reference, 18);
+  return clampPercent(100 - ratioDiff * 105);
+}
+
+function activityPathAmplitude(points) {
+  if (!points?.length) return 0;
+  const xs = points.map((point) => point.x).filter(Number.isFinite);
+  const ys = points.map((point) => point.y).filter(Number.isFinite);
+  const zs = points.map((point) => point.z || 0).filter(Number.isFinite);
+  return Math.hypot(rangeNumbers(xs), rangeNumbers(ys), rangeNumbers(zs));
+}
+
+function trimmedAverage(values, trimRatio = 0.1) {
+  const clean = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!clean.length) return 0;
+  const trim = Math.floor(clean.length * trimRatio);
+  const trimmed = clean.slice(trim, Math.max(trim + 1, clean.length - trim));
+  return averageNumbers(trimmed);
+}
+
+function emptyActivityBucket() {
+  return {
+    weightedActivity: 0,
+    weightedAmplitudePercent: 0,
+    weight: 0,
+    activity: 0,
+    amplitudePercent: 0
+  };
+}
+
+function compactActivityBucket(bucket) {
+  return {
+    activity: clampPercent(bucket.activity),
+    amplitudePercent: clampPercent(bucket.amplitudePercent)
+  };
+}
+
+function activityGroupTitle(group) {
+  if (group === "arms") return "руки";
+  if (group === "legs") return "ноги";
+  return "корпус";
+}
+
+function activitySuggestions(reference, user, weakestGroup) {
+  const suggestions = [];
+  if (reference.total.activity >= 25 && user.total.activity < 12) {
+    suggestions.push("Правое видео почти не набирает движение относительно активного эталона.");
+  } else if (user.total.activity < reference.total.activity - 18) {
+    suggestions.push("В правом видео активности меньше: движение выглядит более сдержанным, чем в эталоне.");
+  } else if (user.total.activity > reference.total.activity + 22) {
+    suggestions.push("В правом видео активности больше: движение может быть резче или суетливее эталона.");
+  } else {
+    suggestions.push("Общий уровень движения близок к эталону.");
+  }
+  if (weakestGroup) suggestions.push(`Сильнее всего отличается активность группы: ${weakestGroup.title}.`);
+  return suggestions;
+}
+
+function activityVerdict(score, referenceActivity, userActivity, weakestGroup) {
+  if (referenceActivity >= 25 && userActivity < 12) {
+    return "Эталон активно двигается, а в правом видео движение почти отсутствует. Эта модель уверенно видит стояние или очень слабую активность.";
+  }
+  if (score >= 86) return "Уровень активности правого видео хорошо совпадает с эталоном: движение по энергии и амплитуде близкое.";
+  if (score >= 68) return `Активность в целом похожа, но ${weakestGroup?.title || "одна из зон"} двигается не так энергично, как в эталоне.`;
+  if (score >= 45) return `Активность совпадает частично: правое видео заметно отличается по уровню движения, особенно в зоне ${weakestGroup?.title || "рук или ног"}.`;
+  return "Активность правого видео сильно не похожа на эталон. Это хороший сигнал для отсеивания стоящего человека или слишком слабого выполнения.";
+}
+
 function trajectoryDirectionScore(leftPath, rightPath) {
   const leftStart = leftPath[0];
   const leftEnd = leftPath.at(-1);
@@ -1089,6 +1387,7 @@ function compareByModel(model, leftScan, rightScan, sync, regions, leftAudio, hy
   if (model === "joint-areas") return compareJointAreasScans(leftScan, rightScan, sync);
   if (model === "trajectory-drawing") return compareTrajectoryDrawingScans(leftScan, rightScan, sync);
   if (model === "zone-grid") return compareZoneGridScans(leftScan, rightScan, sync);
+  if (model === "activity") return compareActivityScans(leftScan, rightScan, sync);
   return compareScans(leftScan, rightScan, sync, regions);
 }
 
@@ -2744,6 +3043,7 @@ function modelComponentMetadata(modelId, result, hybridMethods = defaultHybridMe
   if (modelId === "joint-areas") return { mode: "single", components: ["areas"], label: "Только области суставов" };
   if (modelId === "trajectory-drawing") return { mode: "single", components: ["drawing"], label: "Только рисунок траекторий" };
   if (modelId === "zone-grid") return { mode: "single", components: ["zone-grid"], label: "Сравнение по одинаковым квадратам сетки" };
+  if (modelId === "activity") return { mode: "single", components: ["activity"], label: "Сравнение уровня активности скелета" };
   if (modelId === "zones-drawing") {
     const methods = result?.diagnostics?.hybridMethods || normalizeHybridMethodSettings(hybridMethods);
     return {
@@ -2840,6 +3140,7 @@ function autonomousEnsembleScore(modelScores = {}) {
     "joint-areas": 0.28,
     "zone-grid": 0.16,
     "trajectory-drawing": 0.18,
+    activity: 0.12,
     "2026-07-13": 0.2,
     "2026-07-12": 0.08,
     "openai-expert": 0.1
@@ -2859,8 +3160,10 @@ function autonomousEnsembleScore(modelScores = {}) {
   const jointAreas = modelScores["joint-areas"];
   const zoneGrid = modelScores["zone-grid"];
   const trajectory = modelScores["trajectory-drawing"];
+  const activity = modelScores.activity;
   if (Number.isFinite(jointAreas) && jointAreas < 35 && Number.isFinite(zoneGrid) && zoneGrid < 65) score = Math.min(score, 35);
   if (Number.isFinite(jointAreas) && jointAreas < 45 && Number.isFinite(trajectory) && trajectory < 45) score = Math.min(score, 40);
+  if (Number.isFinite(activity) && activity < 25 && Number.isFinite(trajectory) && trajectory < 55) score = Math.min(score, 28);
   if (Number.isFinite(jointAreas) && jointAreas >= 82 && Number.isFinite(zoneGrid) && zoneGrid >= 84) score = Math.max(score, 84);
   return clampPercent(score);
 }
@@ -5332,7 +5635,7 @@ function App() {
   const [labHistory, setLabHistory] = useState(() => loadLabHistory());
   const [autonomousReferenceFile, setAutonomousReferenceFile] = useState(null);
   const [autonomousCandidateFiles, setAutonomousCandidateFiles] = useState([]);
-  const [autonomousSelectedModels, setAutonomousSelectedModels] = useState(["joint-areas", "zone-grid", "trajectory-drawing", "2026-07-13"]);
+  const [autonomousSelectedModels, setAutonomousSelectedModels] = useState(["joint-areas", "zone-grid", "trajectory-drawing", "activity", "2026-07-13"]);
   const [autonomousRunState, setAutonomousRunState] = useState({
     status: "idle",
     progress: 0,
@@ -5372,6 +5675,7 @@ function App() {
     if (comparisonModel === "joint-areas") return compareJointAreasScans(leftScan, rightScan, activeSync);
     if (comparisonModel === "trajectory-drawing") return compareTrajectoryDrawingScans(leftScan, rightScan, activeSync);
     if (comparisonModel === "zone-grid") return compareZoneGridScans(leftScan, rightScan, activeSync);
+    if (comparisonModel === "activity") return compareActivityScans(leftScan, rightScan, activeSync);
     return comparePoseFrames(leftPose, rightPose, mediaPipeSettings.regions);
   }, [activeSync, comparisonModel, hybridMethods, leftPose, leftScan, mediaPipeSettings.regions, rightPose, rightScan]);
   const comparison = runState.result || (leftScan?.frames?.length && rightScan?.frames?.length ? pendingFullRunComparison() : liveComparison);
@@ -6264,6 +6568,20 @@ function App() {
             )}
             {comparison.diagnostics?.trackingOutliersSkipped > 0 && (
               <MetricCard label="Плохих кадров пропущено" value={comparison.diagnostics.trackingOutliersSkipped} />
+            )}
+            {comparisonModel === "activity" && comparison.diagnostics?.activityReference && comparison.diagnostics?.activityUser && (
+              <>
+                <MetricCard label="Активность эталона" value={`${comparison.diagnostics.activityReference.total.activity}%`} />
+                <MetricCard label="Активность правого видео" value={`${comparison.diagnostics.activityUser.total.activity}%`} />
+                <MetricCard
+                  label="Совпадение активности"
+                  value={comparison.diagnostics.activityMatch != null ? `${comparison.diagnostics.activityMatch}%` : "-"}
+                />
+                <MetricCard
+                  label="Активность по фразе"
+                  value={comparison.diagnostics.phraseMatch != null ? `${comparison.diagnostics.phraseMatch}%` : "-"}
+                />
+              </>
             )}
             {comparison.bodyParts && (
               <>
