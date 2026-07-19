@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.7",
-  versionLabel: "v0.6.7",
-  build: "autonomous-ensemble-lab-2026-07-19"
+  version: "0.6.8",
+  versionLabel: "v0.6.8",
+  build: "history-model-run-metadata-2026-07-19"
 };
 
 const captureEngines = {
@@ -2738,6 +2738,84 @@ function sameFileCandidate(left, right) {
   if (!left || !right || left.source !== "file" || right.source !== "file") return false;
   const durationDiff = Math.abs((left.duration || 0) - (right.duration || 0));
   return left.name === right.name && left.size === right.size && durationDiff < 0.05;
+}
+
+function modelComponentMetadata(modelId, result, hybridMethods = defaultHybridMethodSettings) {
+  if (modelId === "joint-areas") return { mode: "single", components: ["areas"], label: "Только области суставов" };
+  if (modelId === "trajectory-drawing") return { mode: "single", components: ["drawing"], label: "Только рисунок траекторий" };
+  if (modelId === "zone-grid") return { mode: "single", components: ["zone-grid"], label: "Сравнение по одинаковым квадратам сетки" };
+  if (modelId === "zones-drawing") {
+    const methods = result?.diagnostics?.hybridMethods || normalizeHybridMethodSettings(hybridMethods);
+    return {
+      mode: "combined",
+      components: Object.entries(methods)
+        .filter(([, enabled]) => enabled)
+        .map(([key]) => key),
+      label: "Старая комбинированная модель области плюс рисунок",
+      settings: methods
+    };
+  }
+  if (modelId === "all-auto") return { mode: "batch", components: runnableComparisonModelIds, label: "Автопрогон всех моделей" };
+  return { mode: "single", components: [modelId], label: comparisonModels[modelId]?.title || modelId };
+}
+
+function buildModelRunMetadata({
+  app,
+  modelId,
+  modelDetails,
+  result,
+  saveMode,
+  runGroupId,
+  sync,
+  mediaPipeSettings,
+  activeSpecs,
+  hybridMethods
+}) {
+  return {
+    schemaVersion: 1,
+    runGroupId: runGroupId || null,
+    savedAtAppVersion: app.version,
+    savedAtAppBuild: app.build,
+    saveMode,
+    model: {
+      id: modelId,
+      name: modelDetails.name,
+      title: modelDetails.title,
+      version: modelDetails.version,
+      versionLabel: modelDetails.versionLabel,
+      algorithmBuild: modelDetails.algorithmBuild,
+      componentMetadata: modelComponentMetadata(modelId, result, hybridMethods)
+    },
+    result: {
+      method: result?.method || modelDetails.title,
+      score: result?.score ?? null,
+      finalScore: result?.finalScore ?? result?.score ?? null,
+      bestScore: result?.bestScore ?? null,
+      worstScore: result?.worstScore ?? null,
+      framesCompared: result?.framesCompared || 0,
+      durationCompared: result?.durationCompared ?? null,
+      worstMoment: result?.worstMoment ?? null,
+      bodyParts: result?.bodyParts || null,
+      diagnostics: result?.diagnostics || {}
+    },
+    inputSettings: {
+      sync,
+      mediaPipe: {
+        modelVariant: mediaPipeSettings.modelVariant,
+        delegate: mediaPipeSettings.delegate,
+        numPoses: mediaPipeSettings.numPoses,
+        scanFps: mediaPipeSettings.scanFps,
+        landmarkSet: mediaPipeSettings.landmarkSet,
+        regions: mediaPipeSettings.regions,
+        activeAngles: activeSpecs.map((spec) => ({
+          id: spec.id,
+          title: spec.title,
+          region: spec.region,
+          points: spec.points
+        }))
+      }
+    }
+  };
 }
 
 function inferAutonomousCase(fileName = "") {
@@ -5569,6 +5647,7 @@ function App() {
         message: "Автолаборатория: прогоняю все модели сравнения."
       }));
 
+      const autoRunGroupId = crypto.randomUUID();
       const results = [];
       for (const [index, modelId] of runnableComparisonModelIds.entries()) {
         setRunState((previous) => ({
@@ -5595,7 +5674,7 @@ function App() {
       }
 
       for (const { modelId, result } of results) {
-        saveLabExample(result, activeRunSync, "auto", modelId, freshLeftScan, freshRightScan);
+        saveLabExample(result, activeRunSync, "auto", modelId, freshLeftScan, freshRightScan, autoRunGroupId);
       }
 
       const primary = results.find((item) => item.modelId === "2026-07-06")?.result || results[0]?.result || null;
@@ -5788,7 +5867,8 @@ function App() {
     saveMode = "manual",
     modelOverride = comparisonModel,
     leftScanOverride = leftScan,
-    rightScanOverride = rightScan
+    rightScanOverride = rightScan,
+    runGroupId = null
   ) {
     const result = resultOverride || runState.result;
     if (!result?.ready) return;
@@ -5808,6 +5888,7 @@ function App() {
       leftFileName: leftFile?.name || "",
       rightFileName: rightFile?.name || "",
       saveMode,
+      runGroupId,
       expectedScore: expectedScore === "" ? null : Number(expectedScore),
       score: result.score,
       videos: {
@@ -5821,6 +5902,18 @@ function App() {
       comparisonAlgorithmBuild: savedModelDetails.algorithmBuild,
       comparisonModelDetails: savedModelDetails,
       hybridMethods: savedModel === "zones-drawing" ? normalizeHybridMethodSettings(hybridMethods) : null,
+      modelRunMetadata: buildModelRunMetadata({
+        app: appVersion,
+        modelId: savedModel,
+        modelDetails: savedModelDetails,
+        result,
+        saveMode,
+        runGroupId,
+        sync: syncOverride,
+        mediaPipeSettings,
+        activeSpecs,
+        hybridMethods
+      }),
       mediaPipeSettings: {
         ...mediaPipeSettings,
         activeAngles: activeSpecs.map((spec) => ({
