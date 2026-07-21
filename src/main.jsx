@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.9",
-  versionLabel: "v0.7.9",
-  build: "batch-video-data-url-fallback-2026-07-21"
+  version: "0.7.10",
+  versionLabel: "v0.7.10",
+  build: "robust-batch-seeking-2026-07-21"
 };
 
 const captureEngines = {
@@ -2778,6 +2778,47 @@ function waitForVideoMetadata(video, timeoutMs = 20000) {
   });
 }
 
+function waitForVideoSeek(video, targetTime, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const events = ["seeked", "timeupdate", "loadeddata", "canplay"];
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(
+        new Error(
+          `Timeout waiting for seeked; target=${targetTime.toFixed(3)}; current=${Number(video.currentTime || 0).toFixed(3)}; readyState=${video.readyState}; networkState=${video.networkState}`
+        )
+      );
+    }, timeoutMs);
+    const interval = window.setInterval(checkReady, 60);
+
+    function cleanup() {
+      window.clearTimeout(timer);
+      window.clearInterval(interval);
+      events.forEach((eventName) => video.removeEventListener(eventName, checkReady));
+      video.removeEventListener("error", rejectOnce);
+    }
+
+    function checkReady() {
+      const closeEnough = Math.abs((video.currentTime || 0) - targetTime) <= 0.08;
+      if (closeEnough && video.readyState >= 2) {
+        cleanup();
+        resolve();
+      }
+    }
+
+    function rejectOnce() {
+      cleanup();
+      const code = video.error?.code ? ` code ${video.error.code}` : "";
+      const message = video.error?.message ? `: ${video.error.message}` : "";
+      reject(new Error(`Video error during seek${code}${message}`));
+    }
+
+    events.forEach((eventName) => video.addEventListener(eventName, checkReady));
+    video.addEventListener("error", rejectOnce, { once: true });
+    checkReady();
+  });
+}
+
 function isMemoryConstrainedDevice() {
   const ua = navigator.userAgent || "";
   const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -2824,7 +2865,7 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
     const targetTime = Math.min(time, Math.max(0, duration - 0.02));
     if (Math.abs(video.currentTime - targetTime) > 0.01) {
       video.currentTime = targetTime;
-      await waitForVideoEvent(video, "seeked");
+      await waitForVideoSeek(video, targetTime);
     }
     const result = scanLandmarker.detect(video);
     const rawLandmarks = result.landmarks?.[0] || [];
@@ -3388,6 +3429,8 @@ function sequentialFinalModelLabel(steps = []) {
 
 function technicalErrorCode(message = "") {
   const normalized = String(message).toLowerCase();
+  if (normalized.includes("seeked")) return "VIDEO_SEEK_TIMEOUT";
+  if (normalized.includes("not supported") || normalized.includes("content type") || normalized.includes("media_element_err")) return "VIDEO_CODEC_OR_CONTAINER_UNSUPPORTED";
   if (normalized.includes("loadedmetadata")) return "VIDEO_METADATA_TIMEOUT";
   if (normalized.includes("quota")) return "BROWSER_STORAGE_QUOTA";
   if (normalized.includes("not iterable")) return "INVALID_SCAN_DATA";
@@ -3495,6 +3538,18 @@ async function loadFileIntoVideo(video, file) {
   } catch (err) {
     failures.push(`blob-url: ${err instanceof Error ? err.message : String(err)}`);
     URL.revokeObjectURL(blobUrl);
+  }
+
+  if (file.type && file.type !== "video/mp4") {
+    const mp4Blob = file.slice(0, file.size, "video/mp4");
+    const mp4Url = URL.createObjectURL(mp4Blob);
+    try {
+      await loadVideoSource(video, mp4Url);
+      return { url: mp4Url, mode: "blob-url-as-mp4", revoke: () => URL.revokeObjectURL(mp4Url) };
+    } catch (err) {
+      failures.push(`blob-url-as-mp4: ${err instanceof Error ? err.message : String(err)}`);
+      URL.revokeObjectURL(mp4Url);
+    }
   }
 
   if ((file.size || 0) <= 80 * 1024 * 1024) {
