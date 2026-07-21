@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.6",
-  versionLabel: "v0.7.6",
-  build: "activity-micro-jitter-gate-2026-07-21"
+  version: "0.7.7",
+  versionLabel: "v0.7.7",
+  build: "fresh-batch-video-loader-2026-07-21"
 };
 
 const captureEngines = {
@@ -3444,15 +3444,16 @@ async function loadFileIntoVideo(video, file) {
   const url = URL.createObjectURL(file);
   video.pause();
   video.removeAttribute("src");
+  video.load();
   video.srcObject = null;
-  video.src = url;
   video.muted = true;
   video.preload = "auto";
+  video.playsInline = true;
+  const metadataPromise = waitForVideoEvent(video, "loadedmetadata", 20000);
+  video.src = url;
   video.load();
   try {
-    if (video.readyState < 1) {
-      await waitForVideoEvent(video, "loadedmetadata", 15000);
-    }
+    await metadataPromise;
     return url;
   } catch (err) {
     URL.revokeObjectURL(url);
@@ -3460,6 +3461,16 @@ async function loadFileIntoVideo(video, file) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(`${reason}; файл: ${fileDetails}`);
   }
+}
+
+function createHiddenBatchVideo() {
+  const video = document.createElement("video");
+  video.className = "hidden-batch-video";
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "auto";
+  document.body.appendChild(video);
+  return video;
 }
 
 const VideoPane = forwardRef(function VideoPane(
@@ -6349,10 +6360,11 @@ function App() {
   }
 
   async function scanAutonomousFile(file, progressLabel, onProgress) {
-    const video = autonomousVideoRef.current;
+    const video = typeof document !== "undefined" ? createHiddenBatchVideo() : autonomousVideoRef.current;
     if (!video) throw new Error("Скрытый видео-сканер не готов.");
-    const url = await loadFileIntoVideo(video, file);
+    let url = null;
     try {
+      url = await loadFileIntoVideo(video, file);
       const scan = await scanVideoPose(
         video,
         scanLandmarker,
@@ -6371,7 +6383,8 @@ function App() {
       video.pause();
       video.removeAttribute("src");
       video.load();
-      URL.revokeObjectURL(url);
+      if (url) URL.revokeObjectURL(url);
+      if (video !== autonomousVideoRef.current) video.remove();
     }
   }
 
