@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.13",
-  versionLabel: "v0.7.13",
-  build: "auto-batch-history-export-2026-07-21"
+  version: "0.7.14",
+  versionLabel: "v0.7.14",
+  build: "batch-video-decoder-kick-2026-07-21"
 };
 
 const captureEngines = {
@@ -3560,7 +3560,7 @@ async function loadFileIntoVideo(video, file) {
   const failures = [];
   const fileUrl = URL.createObjectURL(file);
   try {
-    await loadVideoSource(video, fileUrl);
+    await loadVideoSource(video, fileUrl, file.type);
     return { url: fileUrl, mode: "file-url", revoke: () => URL.revokeObjectURL(fileUrl) };
   } catch (err) {
     failures.push(`file-url: ${err instanceof Error ? err.message : String(err)}`);
@@ -3571,7 +3571,7 @@ async function loadFileIntoVideo(video, file) {
   const blob = file.slice(0, file.size, file.type || "video/mp4");
   const blobUrl = URL.createObjectURL(blob);
   try {
-    await loadVideoSource(video, blobUrl);
+    await loadVideoSource(video, blobUrl, file.type || "video/mp4");
     return { url: blobUrl, mode: "blob-url", revoke: () => URL.revokeObjectURL(blobUrl) };
   } catch (err) {
     failures.push(`blob-url: ${err instanceof Error ? err.message : String(err)}`);
@@ -3583,7 +3583,7 @@ async function loadFileIntoVideo(video, file) {
     const mp4Blob = file.slice(0, file.size, "video/mp4");
     const mp4Url = URL.createObjectURL(mp4Blob);
     try {
-      await loadVideoSource(video, mp4Url);
+      await loadVideoSource(video, mp4Url, "video/mp4");
       return { url: mp4Url, mode: "blob-url-as-mp4", revoke: () => URL.revokeObjectURL(mp4Url) };
     } catch (err) {
       failures.push(`blob-url-as-mp4: ${err instanceof Error ? err.message : String(err)}`);
@@ -3595,7 +3595,7 @@ async function loadFileIntoVideo(video, file) {
   if ((file.size || 0) <= 80 * 1024 * 1024) {
     try {
       const dataUrl = await readFileAsDataUrl(file);
-      await loadVideoSource(video, dataUrl);
+      await loadVideoSource(video, dataUrl, file.type || "video/mp4");
       return { url: dataUrl, mode: "data-url", revoke: () => {} };
     } catch (err) {
       failures.push(`data-url: ${err instanceof Error ? err.message : String(err)}`);
@@ -3607,23 +3607,81 @@ async function loadFileIntoVideo(video, file) {
   throw new Error(`${failures.join(" | ")}; файл: ${fileDetails}`);
 }
 
-async function loadVideoSource(video, url) {
+async function loadVideoSource(video, url, mimeType = "") {
+  try {
+    await loadVideoSourceDirect(video, url);
+    return true;
+  } catch (directErr) {
+    if (isCodecOrContainerError(directErr)) throw directErr;
+    await yieldToBrowser();
+    try {
+      await loadVideoSourceElement(video, url, mimeType);
+      return true;
+    } catch (sourceErr) {
+      throw new Error(
+        `${directErr instanceof Error ? directErr.message : String(directErr)} | source-tag: ${
+          sourceErr instanceof Error ? sourceErr.message : String(sourceErr)
+        }`
+      );
+    }
+  }
+}
+
+async function loadVideoSourceDirect(video, url) {
+  resetVideoElement(video);
+  const metadataPromise = waitForVideoMetadata(video, 45000);
+  video.src = url;
+  video.load();
+  await kickVideoDecoder(video);
+  await metadataPromise;
+  return true;
+}
+
+async function loadVideoSourceElement(video, url, mimeType = "") {
+  resetVideoElement(video);
+  const source = document.createElement("source");
+  source.src = url;
+  if (mimeType) source.type = mimeType;
+  video.appendChild(source);
+  const metadataPromise = waitForVideoMetadata(video, 45000);
+  video.load();
+  await kickVideoDecoder(video);
+  await metadataPromise;
+  return true;
+}
+
+function resetVideoElement(video) {
   video.pause();
   video.removeAttribute("src");
+  while (video.firstChild) video.removeChild(video.firstChild);
   video.load();
   video.srcObject = null;
   video.muted = true;
   video.preload = "auto";
   video.playsInline = true;
-  const metadataPromise = waitForVideoMetadata(video, 30000);
-  video.src = url;
-  video.load();
+  video.crossOrigin = "anonymous";
+}
+
+async function kickVideoDecoder(video) {
+  await yieldToBrowser();
   try {
-    await metadataPromise;
-    return true;
-  } catch (err) {
-    throw err;
+    const playPromise = video.play();
+    if (playPromise?.then) {
+      await Promise.race([
+        playPromise,
+        new Promise((resolve) => window.setTimeout(resolve, 900))
+      ]);
+    }
+  } catch {
+    // Metadata can still load without autoplay permission; this only wakes lazy mobile/desktop decoders.
+  } finally {
+    video.pause();
   }
+}
+
+function isCodecOrContainerError(err) {
+  const message = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  return message.includes("not supported") || message.includes("content type") || message.includes("code 4");
 }
 
 function readFileAsDataUrl(file) {
@@ -6821,6 +6879,7 @@ function App() {
     } finally {
       video.pause();
       video.removeAttribute("src");
+      while (video.firstChild) video.removeChild(video.firstChild);
       video.load();
       source?.revoke?.();
       if (video !== autonomousVideoRef.current) video.remove();
