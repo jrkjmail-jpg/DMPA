@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.5",
-  versionLabel: "v0.7.5",
-  build: "batch-video-metadata-loader-2026-07-21"
+  version: "0.7.6",
+  versionLabel: "v0.7.6",
+  build: "activity-micro-jitter-gate-2026-07-21"
 };
 
 const captureEngines = {
@@ -209,9 +209,9 @@ const comparisonModels = {
   },
   activity: {
     id: "activity",
-    version: "0.1.0",
-    versionLabel: "v0.1.0",
-    algorithmBuild: "skeleton-activity-level-2026-07-19",
+    version: "0.2.0",
+    versionLabel: "v0.2.0",
+    algorithmBuild: "skeleton-activity-micro-jitter-gate-2026-07-21",
     name: "Активность",
     title: "Активность",
     shortTitle: "12. Активность",
@@ -1089,6 +1089,8 @@ const activityJointSpecs = [
   { id: 27, key: "leftAnkle", title: "Левая стопа", group: "legs", weight: 1.15 },
   { id: 28, key: "rightAnkle", title: "Правая стопа", group: "legs", weight: 1.15 }
 ];
+const activityFrameNoiseFloor = 0.022;
+const activityAmplitudeNoiseFloor = 0.065;
 
 function compareActivityScans(leftScan, rightScan, sync) {
   if (!leftScan?.frames?.length || !rightScan?.frames?.length) return comparePoseFrames(null, null);
@@ -1129,7 +1131,8 @@ function compareActivityScans(leftScan, rightScan, sync) {
       rowPercent("activity-arms", "Активность рук совпадает", groupMatches.find((item) => item.group === "arms")?.score),
       rowPercent("activity-legs", "Активность ног совпадает", groupMatches.find((item) => item.group === "legs")?.score),
       rowPercent("activity-torso", "Активность корпуса совпадает", groupMatches.find((item) => item.group === "torso")?.score),
-      rowPercent("activity-phrase", "Активность по фразе", phraseMatch)
+      rowPercent("activity-phrase", "Активность по фразе", phraseMatch),
+      rowPercent("activity-user-moving-joints", "Реально движущиеся суставы правого видео", rightProfile.total.movingJointRatio * 100)
     ],
     suggestions: activitySuggestions(leftProfile, rightProfile, weakestGroup),
     framesCompared: anglePairs.pairs.length,
@@ -1198,16 +1201,19 @@ function buildActivityProfile(scan) {
     for (const spec of activityJointSpecs) {
       const distance = pointDistance(previous.landmarks?.[spec.id], current.landmarks?.[spec.id]);
       if (!Number.isFinite(distance) || distance > 1.45) continue;
-      byJoint.get(spec.id).speeds.push(distance / dt);
+      const meaningfulDistance = meaningfulActivityDistance(distance);
+      byJoint.get(spec.id).speeds.push(meaningfulDistance / dt);
     }
   }
 
   const jointProfiles = Array.from(byJoint.values()).map(({ spec, speeds, points }) => {
-    const speed = trimmedAverage(speeds, 0.12);
+    const speed = trimmedAverage(speeds.filter((value) => value > 0), 0.12);
     const amplitude = activityPathAmplitude(points);
     const speedPercent = activityRawToPercent(speed);
     const amplitudePercent = activityRawToPercent(amplitude);
-    const activity = clampPercent(speedPercent * 0.72 + amplitudePercent * 0.28);
+    const movingFrameRatio = speeds.length ? speeds.filter((value) => value > 0).length / speeds.length : 0;
+    const sustainedMotion = clampPercent((movingFrameRatio - 0.08) * 135);
+    const activity = clampPercent((speedPercent * 0.68 + amplitudePercent * 0.22 + sustainedMotion * 0.1) * (0.45 + Math.min(0.55, movingFrameRatio * 1.1)));
     const profile = {
       id: spec.id,
       key: spec.key,
@@ -1217,6 +1223,7 @@ function buildActivityProfile(scan) {
       amplitude: Number(amplitude.toFixed(4)),
       speedPercent,
       amplitudePercent,
+      movingFrameRatio: Number(movingFrameRatio.toFixed(3)),
       activity,
       weight: spec.weight
     };
@@ -1235,8 +1242,9 @@ function buildActivityProfile(scan) {
   const totalWeight = jointProfiles.reduce((sum, item) => sum + item.weight, 0);
   const totalActivity = jointProfiles.reduce((sum, item) => sum + item.activity * item.weight, 0) / Math.max(0.001, totalWeight);
   const totalAmplitude = jointProfiles.reduce((sum, item) => sum + item.amplitudePercent * item.weight, 0) / Math.max(0.001, totalWeight);
-  const activeJoints = jointProfiles.filter((item) => item.activity >= 18).length;
-  const veryActiveJoints = jointProfiles.filter((item) => item.activity >= 34).length;
+  const activeJoints = jointProfiles.filter((item) => item.activity >= 22 && item.movingFrameRatio >= 0.12).length;
+  const veryActiveJoints = jointProfiles.filter((item) => item.activity >= 42 && item.movingFrameRatio >= 0.18).length;
+  const movingJointRatio = jointProfiles.filter((item) => item.movingFrameRatio >= 0.14).length / Math.max(1, jointProfiles.length);
 
   return {
     frames: normalizedFrames.length,
@@ -1246,7 +1254,8 @@ function buildActivityProfile(scan) {
       activity: clampPercent(totalActivity),
       amplitudePercent: clampPercent(totalAmplitude),
       activeJointRatio: Number((activeJoints / Math.max(1, jointProfiles.length)).toFixed(3)),
-      veryActiveJointRatio: Number((veryActiveJoints / Math.max(1, jointProfiles.length)).toFixed(3))
+      veryActiveJointRatio: Number((veryActiveJoints / Math.max(1, jointProfiles.length)).toFixed(3)),
+      movingJointRatio: Number(movingJointRatio.toFixed(3))
     },
     groups: {
       arms: compactActivityBucket(groups.arms),
@@ -1285,15 +1294,20 @@ function averageJointMovement(previous, current, dt) {
   const movements = activityJointSpecs
     .map((spec) => {
       const distance = pointDistance(previous?.[spec.id], current?.[spec.id]);
-      return Number.isFinite(distance) && distance <= 1.45 ? (distance / dt) * spec.weight : null;
+      return Number.isFinite(distance) && distance <= 1.45 ? (meaningfulActivityDistance(distance) / dt) * spec.weight : null;
     })
     .filter(Number.isFinite);
-  return trimmedAverage(movements, 0.12);
+  return trimmedAverage(movements.filter((value) => value > 0), 0.12);
 }
 
 function activityRawToPercent(value) {
-  if (!Number.isFinite(value) || value <= 0.035) return 0;
-  return clampPercent(100 * (1 - Math.exp(-(value - 0.035) / 0.58)));
+  if (!Number.isFinite(value) || value <= 0.055) return 0;
+  return clampPercent(100 * (1 - Math.exp(-(value - 0.055) / 0.62)));
+}
+
+function meaningfulActivityDistance(distance) {
+  if (!Number.isFinite(distance) || distance <= activityFrameNoiseFloor) return 0;
+  return distance - activityFrameNoiseFloor;
 }
 
 function activitySimilarityScore(referenceActivity, userActivity) {
@@ -1318,11 +1332,19 @@ function activityJointCoverageScore(reference, user) {
 function applyStillnessActivityGate(rawScore, reference, user) {
   const referenceActive = reference.total.activity >= 28 && reference.total.activeJointRatio >= 0.3;
   if (!referenceActive) return rawScore;
-  const userNearlyStill = user.total.activity < 16 || user.total.activeJointRatio < 0.2;
+  const userNearlyStill =
+    user.total.activity < 18 ||
+    user.total.activeJointRatio < 0.22 ||
+    user.total.movingJointRatio < 0.25 ||
+    (user.total.veryActiveJointRatio < 0.08 && user.total.activity < reference.total.activity * 0.7);
   if (userNearlyStill) return Math.min(rawScore, 15);
+  if (user.total.movingJointRatio < reference.total.movingJointRatio * 0.55) return Math.min(rawScore, 24);
   if (user.total.activity < reference.total.activity * 0.45) return Math.min(rawScore, 28);
   if (user.total.activity < reference.total.activity * 0.62 && user.total.activeJointRatio < reference.total.activeJointRatio * 0.65) {
     return Math.min(rawScore, 42);
+  }
+  if (user.total.activity < reference.total.activity * 0.72 && user.total.veryActiveJointRatio < reference.total.veryActiveJointRatio * 0.55) {
+    return Math.min(rawScore, 48);
   }
   return rawScore;
 }
@@ -1335,7 +1357,12 @@ function activityStillnessGateInfo(reference, user, rawScore, finalScore) {
     referenceActivity: reference.total.activity,
     userActivity: user.total.activity,
     referenceActiveJointRatio: reference.total.activeJointRatio,
-    userActiveJointRatio: user.total.activeJointRatio
+    userActiveJointRatio: user.total.activeJointRatio,
+    referenceMovingJointRatio: reference.total.movingJointRatio,
+    userMovingJointRatio: user.total.movingJointRatio,
+    referenceVeryActiveJointRatio: reference.total.veryActiveJointRatio,
+    userVeryActiveJointRatio: user.total.veryActiveJointRatio,
+    microJitterFloor: activityFrameNoiseFloor
   };
 }
 
@@ -1344,7 +1371,25 @@ function activityPathAmplitude(points) {
   const xs = points.map((point) => point.x).filter(Number.isFinite);
   const ys = points.map((point) => point.y).filter(Number.isFinite);
   const zs = points.map((point) => point.z || 0).filter(Number.isFinite);
-  return Math.hypot(rangeNumbers(xs), rangeNumbers(ys), rangeNumbers(zs));
+  const robustAmplitude = Math.hypot(robustRangeNumbers(xs), robustRangeNumbers(ys), robustRangeNumbers(zs));
+  return Math.max(0, robustAmplitude - activityAmplitudeNoiseFloor);
+}
+
+function robustRangeNumbers(values = []) {
+  const clean = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!clean.length) return 0;
+  if (clean.length < 8) return rangeNumbers(clean);
+  return quantileNumber(clean, 0.9) - quantileNumber(clean, 0.1);
+}
+
+function quantileNumber(sortedValues, quantile) {
+  if (!sortedValues.length) return 0;
+  const index = (sortedValues.length - 1) * quantile;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sortedValues[lower];
+  const weight = index - lower;
+  return sortedValues[lower] * (1 - weight) + sortedValues[upper] * weight;
 }
 
 function trimmedAverage(values, trimRatio = 0.1) {
@@ -1380,8 +1425,8 @@ function activityGroupTitle(group) {
 
 function activitySuggestions(reference, user, weakestGroup) {
   const suggestions = [];
-  if (reference.total.activity >= 25 && user.total.activity < 12) {
-    suggestions.push("Правое видео почти не набирает движение относительно активного эталона.");
+  if (reference.total.activity >= 25 && (user.total.activity < 18 || user.total.movingJointRatio < 0.25)) {
+    suggestions.push("Правое видео почти не набирает осмысленное движение относительно активного эталона: микродрожание точек не считается активностью.");
   } else if (user.total.activity < reference.total.activity - 18) {
     suggestions.push("В правом видео активности меньше: движение выглядит более сдержанным, чем в эталоне.");
   } else if (user.total.activity > reference.total.activity + 22) {
@@ -1394,8 +1439,8 @@ function activitySuggestions(reference, user, weakestGroup) {
 }
 
 function activityVerdict(score, referenceActivity, userActivity, weakestGroup) {
-  if (referenceActivity >= 25 && userActivity < 12) {
-    return "Эталон активно двигается, а в правом видео движение почти отсутствует. Эта модель уверенно видит стояние или очень слабую активность.";
+  if (referenceActivity >= 25 && userActivity < 18) {
+    return "Эталон активно двигается, а в правом видео осмысленное движение почти отсутствует. Микродрожание скелета не засчитано как активность.";
   }
   if (score >= 86) return "Уровень активности правого видео хорошо совпадает с эталоном: движение по энергии и амплитуде близкое.";
   if (score >= 68) return `Активность в целом похожа, но ${weakestGroup?.title || "одна из зон"} двигается не так энергично, как в эталоне.`;
@@ -3249,11 +3294,21 @@ function sequentialGateDecision(modelId, result) {
   if (modelId === "activity") {
     const referenceActivity = result.diagnostics?.activityReference?.total?.activity ?? 0;
     const userActivity = result.diagnostics?.activityUser?.total?.activity ?? 0;
-    if (referenceActivity >= 25 && userActivity < 12) {
+    const referenceMoving = result.diagnostics?.activityReference?.total?.movingJointRatio ?? 0;
+    const userMoving = result.diagnostics?.activityUser?.total?.movingJointRatio ?? 0;
+    const userVeryActive = result.diagnostics?.activityUser?.total?.veryActiveJointRatio ?? 0;
+    if (referenceActivity >= 25 && (userActivity < 18 || userMoving < 0.25 || userVeryActive < 0.08)) {
       return {
         passed: false,
         threshold,
-        reason: `Стоп-гейт: эталон активный (${referenceActivity}%), а правое видео почти стоит (${userActivity}%).`
+        reason: `Стоп-гейт: эталон активный (${referenceActivity}%), а правое видео почти стоит: активность ${userActivity}%, движущихся суставов ${Math.round(userMoving * 100)}%.`
+      };
+    }
+    if (referenceMoving >= 0.35 && userMoving < referenceMoving * 0.55) {
+      return {
+        passed: false,
+        threshold,
+        reason: `Стоп-гейт: движение есть у слишком малого числа суставов (${Math.round(userMoving * 100)}% против ${Math.round(referenceMoving * 100)}% у эталона).`
       };
     }
     if (referenceActivity >= 35 && userActivity < referenceActivity * 0.45) {
