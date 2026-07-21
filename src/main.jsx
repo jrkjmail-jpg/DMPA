@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.10",
-  versionLabel: "v0.7.10",
-  build: "robust-batch-seeking-2026-07-21"
+  version: "0.7.11",
+  versionLabel: "v0.7.11",
+  build: "skip-bad-batch-seek-frames-2026-07-21"
 };
 
 const captureEngines = {
@@ -2859,15 +2859,35 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
   const specs = activeAngleSpecs(settings.regions);
   const frames = [];
   let scannedFrames = 0;
+  let seekFramesSkipped = 0;
+  let detectFramesSkipped = 0;
+  const scanWarnings = [];
 
   for (let time = scanStart; time <= scanEnd; time += step) {
     scannedFrames += 1;
     const targetTime = Math.min(time, Math.max(0, duration - 0.02));
     if (Math.abs(video.currentTime - targetTime) > 0.01) {
       video.currentTime = targetTime;
-      await waitForVideoSeek(video, targetTime);
+      try {
+        await waitForVideoSeek(video, targetTime);
+      } catch (err) {
+        seekFramesSkipped += 1;
+        if (scanWarnings.length < 5) scanWarnings.push(err instanceof Error ? err.message : String(err));
+        onProgress?.(Math.min(100, Math.round(((time - scanStart) / scanDuration) * 100)));
+        if (scannedFrames % 10 === 0) await yieldToBrowser();
+        continue;
+      }
     }
-    const result = scanLandmarker.detect(video);
+    let result = null;
+    try {
+      result = scanLandmarker.detect(video);
+    } catch (err) {
+      detectFramesSkipped += 1;
+      if (scanWarnings.length < 5) scanWarnings.push(err instanceof Error ? err.message : String(err));
+      onProgress?.(Math.min(100, Math.round(((time - scanStart) / scanDuration) * 100)));
+      if (scannedFrames % 10 === 0) await yieldToBrowser();
+      continue;
+    }
     const rawLandmarks = result.landmarks?.[0] || [];
     if (rawLandmarks.length) {
       const landmarks = compactLandmarks(rawLandmarks);
@@ -2880,6 +2900,12 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
     }
     onProgress?.(Math.min(100, Math.round(((time - scanStart) / scanDuration) * 100)));
     if (scannedFrames % 10 === 0) await yieldToBrowser();
+  }
+
+  if (!frames.length) {
+    throw new Error(
+      `Видео загрузилось, но сканер не получил ни одного кадра со скелетом. Seek skipped=${seekFramesSkipped}, detect skipped=${detectFramesSkipped}. ${scanWarnings[0] || ""}`
+    );
   }
 
   video.currentTime = previousTime;
@@ -2908,6 +2934,8 @@ async function scanVideoPose(video, scanLandmarker, onProgress, range = null, se
       requestedFrames: Math.ceil(scanDuration * requestedFps),
       frameBudget,
       scannedFrames,
+      seekFramesSkipped,
+      detectFramesSkipped,
       mobileSafe,
       landmarkSet: settings.landmarkSet,
       regions: settings.regions,
