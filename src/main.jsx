@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.11",
-  versionLabel: "v0.7.11",
-  build: "skip-bad-batch-seek-frames-2026-07-21"
+  version: "0.7.12",
+  versionLabel: "v0.7.12",
+  build: "batch-original-file-url-first-2026-07-21"
 };
 
 const captureEngines = {
@@ -3558,6 +3558,16 @@ async function loadFileIntoVideo(video, file) {
   if (!video || !file) throw new Error("Не выбран видеофайл.");
   const fileDetails = `${file.name || "без имени"} (${Math.round((file.size || 0) / 1024 / 1024)} МБ, ${file.type || "тип неизвестен"})`;
   const failures = [];
+  const fileUrl = URL.createObjectURL(file);
+  try {
+    await loadVideoSource(video, fileUrl);
+    return { url: fileUrl, mode: "file-url", revoke: () => URL.revokeObjectURL(fileUrl) };
+  } catch (err) {
+    failures.push(`file-url: ${err instanceof Error ? err.message : String(err)}`);
+    URL.revokeObjectURL(fileUrl);
+    await yieldToBrowser();
+  }
+
   const blob = file.slice(0, file.size, file.type || "video/mp4");
   const blobUrl = URL.createObjectURL(blob);
   try {
@@ -3566,6 +3576,7 @@ async function loadFileIntoVideo(video, file) {
   } catch (err) {
     failures.push(`blob-url: ${err instanceof Error ? err.message : String(err)}`);
     URL.revokeObjectURL(blobUrl);
+    await yieldToBrowser();
   }
 
   if (file.type && file.type !== "video/mp4") {
@@ -3577,6 +3588,7 @@ async function loadFileIntoVideo(video, file) {
     } catch (err) {
       failures.push(`blob-url-as-mp4: ${err instanceof Error ? err.message : String(err)}`);
       URL.revokeObjectURL(mp4Url);
+      await yieldToBrowser();
     }
   }
 
