@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.7",
-  versionLabel: "v0.7.7",
-  build: "fresh-batch-video-loader-2026-07-21"
+  version: "0.7.8",
+  versionLabel: "v0.7.8",
+  build: "robust-batch-video-metadata-2026-07-21"
 };
 
 const captureEngines = {
@@ -2734,6 +2734,50 @@ function waitForVideoEvent(video, eventName, timeoutMs = 5000) {
   });
 }
 
+function waitForVideoMetadata(video, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const events = ["loadedmetadata", "durationchange", "loadeddata", "canplay"];
+    const startedAt = Date.now();
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timeout waiting for loadedmetadata; readyState=${video.readyState}; networkState=${video.networkState}; duration=${video.duration || "unknown"}; size=${video.videoWidth || 0}x${video.videoHeight || 0}`));
+    }, timeoutMs);
+    const interval = window.setInterval(checkReady, 80);
+
+    function cleanup() {
+      window.clearTimeout(timer);
+      window.clearInterval(interval);
+      events.forEach((eventName) => video.removeEventListener(eventName, checkReady));
+      video.removeEventListener("error", rejectOnce);
+    }
+
+    function hasMetadata() {
+      return video.readyState >= 1 || Number.isFinite(video.duration) || (video.videoWidth > 0 && video.videoHeight > 0);
+    }
+
+    function checkReady() {
+      if (hasMetadata()) {
+        cleanup();
+        resolve();
+      } else if (Date.now() - startedAt > 500 && video.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) {
+        cleanup();
+        reject(new Error("Video source is not supported by this browser"));
+      }
+    }
+
+    function rejectOnce() {
+      cleanup();
+      const code = video.error?.code ? ` code ${video.error.code}` : "";
+      const message = video.error?.message ? `: ${video.error.message}` : "";
+      reject(new Error(`Video error${code}${message}`));
+    }
+
+    events.forEach((eventName) => video.addEventListener(eventName, checkReady));
+    video.addEventListener("error", rejectOnce, { once: true });
+    checkReady();
+  });
+}
+
 function isMemoryConstrainedDevice() {
   const ua = navigator.userAgent || "";
   const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -3449,7 +3493,7 @@ async function loadFileIntoVideo(video, file) {
   video.muted = true;
   video.preload = "auto";
   video.playsInline = true;
-  const metadataPromise = waitForVideoEvent(video, "loadedmetadata", 20000);
+  const metadataPromise = waitForVideoMetadata(video, 30000);
   video.src = url;
   video.load();
   try {
@@ -3466,6 +3510,14 @@ async function loadFileIntoVideo(video, file) {
 function createHiddenBatchVideo() {
   const video = document.createElement("video");
   video.className = "hidden-batch-video";
+  video.style.position = "fixed";
+  video.style.left = "-10000px";
+  video.style.top = "0";
+  video.style.width = "320px";
+  video.style.height = "180px";
+  video.style.opacity = "0.01";
+  video.style.pointerEvents = "none";
+  video.style.zIndex = "-1";
   video.muted = true;
   video.playsInline = true;
   video.preload = "auto";
