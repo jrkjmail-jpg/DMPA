@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.4",
-  versionLabel: "v0.7.4",
-  build: "sequential-technical-error-card-2026-07-21"
+  version: "0.7.5",
+  versionLabel: "v0.7.5",
+  build: "batch-video-metadata-loader-2026-07-21"
 };
 
 const captureEngines = {
@@ -2663,12 +2663,12 @@ function usePoseLandmarker(settings) {
   return { landmarker, scanLandmarker, error };
 }
 
-function waitForVideoEvent(video, eventName) {
+function waitForVideoEvent(video, eventName, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
       cleanup();
       reject(new Error(`Timeout waiting for ${eventName}`));
-    }, 5000);
+    }, timeoutMs);
     function cleanup() {
       window.clearTimeout(timer);
       video.removeEventListener(eventName, resolveOnce);
@@ -2680,7 +2680,9 @@ function waitForVideoEvent(video, eventName) {
     }
     function rejectOnce() {
       cleanup();
-      reject(new Error("Video error"));
+      const code = video.error?.code ? ` code ${video.error.code}` : "";
+      const message = video.error?.message ? `: ${video.error.message}` : "";
+      reject(new Error(`Video error${code}${message}`));
     }
     video.addEventListener(eventName, resolveOnce, { once: true });
     video.addEventListener("error", rejectOnce, { once: true });
@@ -3391,12 +3393,17 @@ async function loadFileIntoVideo(video, file) {
   video.src = url;
   video.muted = true;
   video.preload = "auto";
+  video.load();
   try {
-    await waitForVideoEvent(video, "loadedmetadata");
+    if (video.readyState < 1) {
+      await waitForVideoEvent(video, "loadedmetadata", 15000);
+    }
     return url;
   } catch (err) {
     URL.revokeObjectURL(url);
-    throw err;
+    const fileDetails = `${file.name || "без имени"} (${Math.round((file.size || 0) / 1024 / 1024)} МБ, ${file.type || "тип неизвестен"})`;
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`${reason}; файл: ${fileDetails}`);
   }
 }
 
