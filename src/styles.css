@@ -1378,6 +1378,11 @@ h3 {
   font-size: 28px;
 }
 
+.sequential-result-card strong.technical {
+  color: #b12626;
+  font-size: 24px;
+}
+
 .sequential-result-card p {
   color: #52677c;
   margin: 0;

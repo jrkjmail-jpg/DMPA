@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.3",
-  versionLabel: "v0.7.3",
-  build: "sequential-scan-failure-card-2026-07-21"
+  version: "0.7.4",
+  versionLabel: "v0.7.4",
+  build: "sequential-technical-error-card-2026-07-21"
 };
 
 const captureEngines = {
@@ -3285,6 +3285,16 @@ function sequentialFinalModelLabel(steps = []) {
   return comparisonModels[lastCheckedStep.modelId]?.title || lastCheckedStep.modelTitle || lastCheckedStep.modelId;
 }
 
+function technicalErrorCode(message = "") {
+  const normalized = String(message).toLowerCase();
+  if (normalized.includes("loadedmetadata")) return "VIDEO_METADATA_TIMEOUT";
+  if (normalized.includes("quota")) return "BROWSER_STORAGE_QUOTA";
+  if (normalized.includes("not iterable")) return "INVALID_SCAN_DATA";
+  if (normalized.includes("mediapipe") || normalized.includes("calculatorgraph")) return "MEDIAPIPE_GRAPH_ERROR";
+  if (normalized.includes("permission") || normalized.includes("denied")) return "BROWSER_PERMISSION_DENIED";
+  return "TECHNICAL_ANALYSIS_ERROR";
+}
+
 function shuffledItems(items = []) {
   const copy = [...items];
   for (let i = copy.length - 1; i > 0; i -= 1) {
@@ -4456,13 +4466,17 @@ function SequentialGateLab({
                       : `остановлено на шаге ${item.stoppedAtStep || 1}`}
                 </span>
               </div>
-              <strong>{item.finalScore}%</strong>
-              <span>Итог последнего гейта: {item.finalModelTitle || sequentialFinalModelLabel(item.steps)}</span>
+              <strong className={item.stopStage === "scan" ? "technical" : ""}>
+                {item.stopStage === "scan" ? "техническая ошибка" : `${item.finalScore}%`}
+              </strong>
+              <span>{item.stopStage === "scan" ? `Этап: ${item.finalModelTitle || "Сканирование видео"}` : `Итог последнего гейта: ${item.finalModelTitle || sequentialFinalModelLabel(item.steps)}`}</span>
+              {item.stopStage === "scan" && <span>Код ошибки: {item.errorCode || item.steps?.[0]?.errorCode || "TECHNICAL_ANALYSIS_ERROR"}</span>}
               <p>{item.stopReason || "Все гейты пройдены, видео можно отправлять в более глубокий анализ."}</p>
               <div className="sequential-steps">
                 {item.steps.map((step) => (
                   <span key={`${item.id}-${step.index}`} className={step.passed ? "passed" : "stopped"}>
-                    {step.index}. {step.modelTitle || comparisonModels[step.modelId]?.title || step.modelId}: {step.score == null ? "-" : `${step.score}%`}
+                    {step.index}. {step.modelTitle || comparisonModels[step.modelId]?.title || step.modelId}:{" "}
+                    {step.stage === "scan" ? step.errorCode || "техническая ошибка" : step.score == null ? "-" : `${step.score}%`}
                   </span>
                 ))}
               </div>
@@ -6475,6 +6489,7 @@ function App() {
           completedWork += 1;
         } catch (err) {
           const errorMessage = err instanceof Error ? err.message : String(err);
+          const errorCode = technicalErrorCode(errorMessage);
           const stopReason = `Технический стоп: не удалось загрузить или отсканировать видео. Деталь: ${errorMessage}`;
           completedWork += 1 + executionOrder.length;
           const steps = [
@@ -6483,11 +6498,12 @@ function App() {
               modelId: "scan",
               modelTitle: "Сканирование видео",
               modelVersion: appVersion.versionLabel,
-              score: 0,
-              finalScore: 0,
+              score: null,
+              finalScore: null,
               threshold: 0,
               passed: false,
               reason: stopReason,
+              errorCode,
               error: errorMessage,
               stage: "scan"
             }
@@ -6501,7 +6517,9 @@ function App() {
             stoppedAtStep: 0,
             stopStage: "scan",
             stopReason,
-            finalScore: 0,
+            errorCode,
+            errorMessage,
+            finalScore: null,
             finalScoreMode: "technical-scan-stop",
             finalModelId: "scan",
             finalModelTitle: "Сканирование видео",
