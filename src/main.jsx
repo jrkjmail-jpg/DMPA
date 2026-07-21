@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.6.9",
-  versionLabel: "v0.6.9",
-  build: "activity-comparison-model-2026-07-19"
+  version: "0.7.0",
+  versionLabel: "v0.7.0",
+  build: "sequential-gate-lab-2026-07-21"
 };
 
 const captureEngines = {
@@ -3178,6 +3178,66 @@ function autonomousRecommendation(caseType, ensembleScore, modelScores = {}) {
   return "Ансамбль ведет себя ожидаемо для этого имени файла.";
 }
 
+const sequentialGateThresholds = {
+  activity: 58,
+  overlay: 64,
+  poses: 62,
+  angles: 62,
+  "joint-areas": 62,
+  "trajectory-drawing": 55,
+  "zone-grid": 60,
+  "2026-07-06": 62,
+  "2026-07-12": 62,
+  "2026-07-13": 62,
+  "openai-expert": 62
+};
+
+function sequentialGateDecision(modelId, result) {
+  const threshold = sequentialGateThresholds[modelId] ?? 62;
+  if (!result?.ready) {
+    return {
+      passed: false,
+      threshold,
+      reason: "Модель не смогла рассчитать результат."
+    };
+  }
+
+  const score = clampPercent(result.finalScore ?? result.score);
+  if (modelId === "activity") {
+    const referenceActivity = result.diagnostics?.activityReference?.total?.activity ?? 0;
+    const userActivity = result.diagnostics?.activityUser?.total?.activity ?? 0;
+    if (referenceActivity >= 25 && userActivity < 12) {
+      return {
+        passed: false,
+        threshold,
+        reason: `Стоп-гейт: эталон активный (${referenceActivity}%), а правое видео почти стоит (${userActivity}%).`
+      };
+    }
+    if (referenceActivity >= 35 && userActivity < referenceActivity * 0.45) {
+      return {
+        passed: false,
+        threshold,
+        reason: `Стоп-гейт: активности правого видео слишком мало относительно эталона (${userActivity}% против ${referenceActivity}%).`
+      };
+    }
+  }
+
+  return {
+    passed: score >= threshold,
+    threshold,
+    reason:
+      score >= threshold
+        ? `Гейт пройден: ${score}% при пороге ${threshold}%.`
+        : `Стоп-гейт: ${score}% ниже порога ${threshold}%.`
+  };
+}
+
+function sequentialFinalScore(steps = []) {
+  const passedScores = steps.filter((step) => step.passed && Number.isFinite(step.score)).map((step) => step.score);
+  if (!passedScores.length) return 0;
+  return clampPercent(averageNumbers(passedScores));
+}
+
 function shuffledItems(items = []) {
   const copy = [...items];
   for (let i = copy.length - 1; i > 0; i -= 1) {
@@ -4102,7 +4162,7 @@ function AutonomousEnsembleLab({
       <div className="lab-header">
         <div>
           <p className="eyebrow">Autonomous Ensemble Lab</p>
-          <h2>Автономный анализ пачки видео</h2>
+          <h2>Общий автономный анализ пачки видео</h2>
         </div>
         <span>{runState.results.length} результатов</span>
       </div>
@@ -4220,6 +4280,140 @@ function AutonomousEnsembleLab({
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function SequentialGateLab({
+  referenceFile,
+  candidateFiles,
+  modelSequence,
+  runState,
+  onReferenceChange,
+  onCandidatesChange,
+  onAddModel,
+  onRemoveModelAt,
+  onClearSequence,
+  onRun,
+  onExport
+}) {
+  const selectableModels = runnableComparisonModelIds.filter((id) => id !== "openai-expert");
+  return (
+    <section className="autonomous-lab sequential-lab">
+      <div className="lab-header">
+        <div>
+          <p className="eyebrow">Sequential Gate Lab</p>
+          <h2>Последовательный автономный анализ</h2>
+        </div>
+        <span>{runState.results.length} результатов</span>
+      </div>
+
+      <div className="autonomous-grid">
+        <label className="file-drop">
+          <FileVideo size={18} />
+          <span>
+            <b>Эталон педагога</b>
+            {referenceFile ? referenceFile.name : "Выберите один файл"}
+          </span>
+          <input type="file" accept="video/*" onChange={(event) => onReferenceChange(event.target.files?.[0] || null)} />
+        </label>
+        <label className="file-drop">
+          <FileVideo size={18} />
+          <span>
+            <b>Видео учеников</b>
+            {candidateFiles.length ? `${candidateFiles.length} файлов` : "Выберите несколько файлов"}
+          </span>
+          <input type="file" accept="video/*" multiple onChange={(event) => onCandidatesChange(Array.from(event.target.files || []))} />
+        </label>
+      </div>
+
+      <div className="sequence-builder">
+        <div>
+          <p className="eyebrow">Добавить гейт</p>
+          <div className="sequence-models">
+            {selectableModels.map((modelId) => {
+              const modelItem = comparisonModels[modelId];
+              return (
+                <button type="button" key={modelId} onClick={() => onAddModel(modelId)}>
+                  <b>{modelItem.title}</b>
+                  <span>{modelItem.versionLabel}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="sequence-list">
+          <div className="trial-list-head">
+            <strong>Порядок прохождения</strong>
+            <button type="button" onClick={onClearSequence} disabled={!modelSequence.length}>
+              Очистить
+            </button>
+          </div>
+          {modelSequence.length ? (
+            modelSequence.map((modelId, index) => (
+              <div className="sequence-step" key={`${modelId}-${index}`}>
+                <span>
+                  <b>{index + 1}. {comparisonModels[modelId]?.title || modelId}</b>
+                  порог {sequentialGateThresholds[modelId] ?? 62}%
+                </span>
+                <button type="button" onClick={() => onRemoveModelAt(index)}>
+                  Убрать
+                </button>
+              </div>
+            ))
+          ) : (
+            <p className="sync-note">Нажимайте модели слева: первая станет первым пропускным гейтом, вторая проверит только прошедшие видео.</p>
+          )}
+        </div>
+      </div>
+
+      <div className="sync-actions autonomous-actions">
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={!referenceFile || !candidateFiles.length || !modelSequence.length || runState.status === "running"}
+        >
+          <Play size={18} />
+          {runState.status === "running" ? `Конвейер ${runState.progress}%` : "Запустить последовательность"}
+        </button>
+        <button type="button" onClick={onExport} disabled={!runState.results.length}>
+          Экспорт конвейера JSON
+        </button>
+        <span>{runState.message || "Каждая модель решает, пропускать ли видео к следующему гейту."}</span>
+      </div>
+
+      <div className={`run-status ${runState.status}`}>
+        <div>
+          <strong>{runState.status === "running" ? "Последовательный анализ считает" : "Последовательный анализ готов"}</strong>
+          <span>{runState.message || "Соберите порядок моделей, затем запустите пакет учеников."}</span>
+        </div>
+        <div className="run-progress" aria-label="Прогресс последовательной лаборатории">
+          <i style={{ width: `${runState.progress}%` }} />
+        </div>
+      </div>
+
+      {runState.results.length > 0 && (
+        <div className="sequential-results">
+          {runState.results.map((item) => (
+            <div className={`sequential-result-card ${item.passed ? "passed" : "stopped"}`} key={item.id}>
+              <div>
+                <h3>{item.fileName}</h3>
+                <span>{item.passed ? "прошло всю последовательность" : `остановлено на шаге ${item.stoppedAtStep || 1}`}</span>
+              </div>
+              <strong>{item.finalScore}%</strong>
+              <p>{item.stopReason || "Все гейты пройдены, видео можно отправлять в более глубокий анализ."}</p>
+              <div className="sequential-steps">
+                {item.steps.map((step) => (
+                  <span key={`${item.id}-${step.index}`} className={step.passed ? "passed" : "stopped"}>
+                    {step.index}. {comparisonModels[step.modelId]?.title || step.modelId}: {step.score == null ? "-" : `${step.score}%`}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </section>
@@ -5644,6 +5838,16 @@ function App() {
     bestTrials: [],
     executionOrder: []
   });
+  const [sequentialReferenceFile, setSequentialReferenceFile] = useState(null);
+  const [sequentialCandidateFiles, setSequentialCandidateFiles] = useState([]);
+  const [sequentialModelSequence, setSequentialModelSequence] = useState(["activity", "joint-areas"]);
+  const [sequentialRunState, setSequentialRunState] = useState({
+    status: "idle",
+    progress: 0,
+    message: "",
+    results: [],
+    executionOrder: []
+  });
   const activeSpecs = useMemo(() => activeAngleSpecs(mediaPipeSettings.regions), [mediaPipeSettings.regions]);
   const activeSync = useMemo(() => effectiveSync(sync, manualSync), [sync, manualSync]);
   const motionCapComparison = useMemo(
@@ -6006,6 +6210,14 @@ function App() {
     );
   }
 
+  function addSequentialModel(modelId) {
+    setSequentialModelSequence((items) => [...items, modelId]);
+  }
+
+  function removeSequentialModelAt(indexToRemove) {
+    setSequentialModelSequence((items) => items.filter((_, index) => index !== indexToRemove));
+  }
+
   async function scanAutonomousFile(file, progressLabel, onProgress) {
     const video = autonomousVideoRef.current;
     if (!video) throw new Error("Скрытый видео-сканер не готов.");
@@ -6161,6 +6373,158 @@ function App() {
         status: "error",
         progress: 0,
         message: `Автономная лаборатория остановилась: ${err instanceof Error ? err.message : String(err)}`
+      }));
+    }
+  }
+
+  async function runSequentialGateLab() {
+    if (sequentialRunState.status === "running") return;
+    if (!sequentialReferenceFile || !sequentialCandidateFiles.length || !sequentialModelSequence.length) {
+      setSequentialRunState((previous) => ({
+        ...previous,
+        status: "error",
+        message: "Выберите эталон, видео учеников и хотя бы один гейт."
+      }));
+      return;
+    }
+
+    const executionOrder = [...sequentialModelSequence];
+    const totalWork = 1 + sequentialCandidateFiles.length * (1 + executionOrder.length);
+    let completedWork = 0;
+    const updateProgress = (message) => {
+      setSequentialRunState((previous) => ({
+        ...previous,
+        status: "running",
+        progress: Math.min(99, Math.round((completedWork / Math.max(1, totalWork)) * 100)),
+        message
+      }));
+    };
+
+    setSequentialRunState({
+      status: "running",
+      progress: 0,
+      message: "Последовательный анализ: сканирую эталон педагога.",
+      results: [],
+      executionOrder
+    });
+
+    try {
+      const reference = await scanAutonomousFile(sequentialReferenceFile, "Эталон", (message) => updateProgress(message));
+      completedWork += 1;
+      const results = [];
+
+      for (const candidateFile of sequentialCandidateFiles) {
+        updateProgress(`Сканирую ${candidateFile.name}.`);
+        const candidate = await scanAutonomousFile(candidateFile, candidateFile.name, (message) => updateProgress(message));
+        completedWork += 1;
+
+        const runSync =
+          reference.audio && candidate.audio
+            ? estimateAudioSync(reference.audio, candidate.audio)
+            : { ready: false, offsetSeconds: 0, confidence: 0, message: "Аудио-синхронизация недоступна." };
+        const steps = [];
+        let passed = true;
+        let stopReason = "";
+        let stoppedAtStep = null;
+
+        for (const [index, modelId] of executionOrder.entries()) {
+          updateProgress(`${candidateFile.name}: гейт ${index + 1} "${comparisonModels[modelId]?.title || modelId}".`);
+          try {
+            const result = await compareByModelAsync(
+              modelId,
+              reference.scan,
+              candidate.scan,
+              runSync,
+              mediaPipeSettings.regions,
+              reference.audio,
+              mediaPipeSettings,
+              hybridMethods
+            );
+            const decision = sequentialGateDecision(modelId, result);
+            steps.push({
+              index: index + 1,
+              modelId,
+              modelTitle: comparisonModels[modelId]?.title || modelId,
+              modelVersion: comparisonModels[modelId]?.versionLabel || "",
+              score: result?.ready ? result.score : null,
+              finalScore: result?.finalScore ?? result?.score ?? null,
+              threshold: decision.threshold,
+              passed: decision.passed,
+              reason: decision.reason,
+              diagnostics: result?.diagnostics || {},
+              bodyParts: result?.bodyParts || null,
+              framesCompared: result?.framesCompared || 0,
+              verdict: result?.verdict || ""
+            });
+            completedWork += 1;
+            if (!decision.passed) {
+              passed = false;
+              stopReason = decision.reason;
+              stoppedAtStep = index + 1;
+              completedWork += executionOrder.length - index - 1;
+              break;
+            }
+          } catch (err) {
+            passed = false;
+            stopReason = `Стоп-гейт: модель не рассчиталась (${err instanceof Error ? err.message : String(err)}).`;
+            stoppedAtStep = index + 1;
+            steps.push({
+              index: index + 1,
+              modelId,
+              modelTitle: comparisonModels[modelId]?.title || modelId,
+              modelVersion: comparisonModels[modelId]?.versionLabel || "",
+              score: null,
+              finalScore: null,
+              threshold: sequentialGateThresholds[modelId] ?? 62,
+              passed: false,
+              reason: stopReason,
+              error: err instanceof Error ? err.message : String(err)
+            });
+            completedWork += executionOrder.length - index;
+            break;
+          }
+          await yieldToBrowser();
+        }
+
+        const item = {
+          id: crypto.randomUUID(),
+          createdAt: new Date().toISOString(),
+          referenceFileName: sequentialReferenceFile.name,
+          fileName: candidateFile.name,
+          passed,
+          stoppedAtStep,
+          stopReason,
+          finalScore: sequentialFinalScore(steps),
+          steps,
+          sync: runSync,
+          mediaPipeSettings,
+          appVersion,
+          executionOrder
+        };
+        results.push(item);
+        setSequentialRunState({
+          status: "running",
+          progress: Math.min(99, Math.round((completedWork / Math.max(1, totalWork)) * 100)),
+          message: passed ? `${candidateFile.name}: прошел всю последовательность.` : `${candidateFile.name}: ${stopReason}`,
+          results: [...results],
+          executionOrder
+        });
+        await yieldToBrowser();
+      }
+
+      setSequentialRunState({
+        status: "done",
+        progress: 100,
+        message: `Последовательный анализ завершен: ${results.filter((item) => item.passed).length}/${results.length} видео прошли все гейты.`,
+        results,
+        executionOrder
+      });
+    } catch (err) {
+      setSequentialRunState((previous) => ({
+        ...previous,
+        status: "error",
+        progress: 0,
+        message: `Последовательный анализ остановился: ${err instanceof Error ? err.message : String(err)}`
       }));
     }
   }
@@ -6354,6 +6718,36 @@ function App() {
             executionOrder: autonomousRunState.executionOrder,
             bestTrials: autonomousRunState.bestTrials,
             results: autonomousRunState.results
+          })
+        }
+      />
+
+      <SequentialGateLab
+        referenceFile={sequentialReferenceFile}
+        candidateFiles={sequentialCandidateFiles}
+        modelSequence={sequentialModelSequence}
+        runState={sequentialRunState}
+        onReferenceChange={(file) => {
+          setSequentialReferenceFile(file);
+          setSequentialRunState({ status: "idle", progress: 0, message: "", results: [], executionOrder: [] });
+        }}
+        onCandidatesChange={(files) => {
+          setSequentialCandidateFiles(files);
+          setSequentialRunState({ status: "idle", progress: 0, message: "", results: [], executionOrder: [] });
+        }}
+        onAddModel={addSequentialModel}
+        onRemoveModelAt={removeSequentialModelAt}
+        onClearSequence={() => setSequentialModelSequence([])}
+        onRun={runSequentialGateLab}
+        onExport={() =>
+          downloadJson("dmpa-sequential-gate-lab.json", {
+            appVersion,
+            referenceFileName: sequentialReferenceFile?.name || "",
+            candidateFileNames: sequentialCandidateFiles.map((file) => file.name),
+            modelSequence: sequentialModelSequence,
+            gateThresholds: sequentialGateThresholds,
+            executionOrder: sequentialRunState.executionOrder,
+            results: sequentialRunState.results
           })
         }
       />
