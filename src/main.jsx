@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.8",
-  versionLabel: "v0.7.8",
-  build: "robust-batch-video-metadata-2026-07-21"
+  version: "0.7.9",
+  versionLabel: "v0.7.9",
+  build: "batch-video-data-url-fallback-2026-07-21"
 };
 
 const captureEngines = {
@@ -3485,7 +3485,34 @@ function scoreAutonomousTrial(results = [], models = []) {
 
 async function loadFileIntoVideo(video, file) {
   if (!video || !file) throw new Error("Не выбран видеофайл.");
-  const url = URL.createObjectURL(file);
+  const fileDetails = `${file.name || "без имени"} (${Math.round((file.size || 0) / 1024 / 1024)} МБ, ${file.type || "тип неизвестен"})`;
+  const failures = [];
+  const blob = file.slice(0, file.size, file.type || "video/mp4");
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    await loadVideoSource(video, blobUrl);
+    return { url: blobUrl, mode: "blob-url", revoke: () => URL.revokeObjectURL(blobUrl) };
+  } catch (err) {
+    failures.push(`blob-url: ${err instanceof Error ? err.message : String(err)}`);
+    URL.revokeObjectURL(blobUrl);
+  }
+
+  if ((file.size || 0) <= 80 * 1024 * 1024) {
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      await loadVideoSource(video, dataUrl);
+      return { url: dataUrl, mode: "data-url", revoke: () => {} };
+    } catch (err) {
+      failures.push(`data-url: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else {
+    failures.push("data-url: файл больше 80 МБ, fallback отключен");
+  }
+
+  throw new Error(`${failures.join(" | ")}; файл: ${fileDetails}`);
+}
+
+async function loadVideoSource(video, url) {
   video.pause();
   video.removeAttribute("src");
   video.load();
@@ -3498,13 +3525,19 @@ async function loadFileIntoVideo(video, file) {
   video.load();
   try {
     await metadataPromise;
-    return url;
+    return true;
   } catch (err) {
-    URL.revokeObjectURL(url);
-    const fileDetails = `${file.name || "без имени"} (${Math.round((file.size || 0) / 1024 / 1024)} МБ, ${file.type || "тип неизвестен"})`;
-    const reason = err instanceof Error ? err.message : String(err);
-    throw new Error(`${reason}; файл: ${fileDetails}`);
+    throw err;
   }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error(reader.error?.message || "FileReader error"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function createHiddenBatchVideo() {
@@ -6414,9 +6447,10 @@ function App() {
   async function scanAutonomousFile(file, progressLabel, onProgress) {
     const video = typeof document !== "undefined" ? createHiddenBatchVideo() : autonomousVideoRef.current;
     if (!video) throw new Error("Скрытый видео-сканер не готов.");
-    let url = null;
+    let source = null;
     try {
-      url = await loadFileIntoVideo(video, file);
+      source = await loadFileIntoVideo(video, file);
+      onProgress?.(`${progressLabel}: видео подготовлено (${source.mode})`);
       const scan = await scanVideoPose(
         video,
         scanLandmarker,
@@ -6435,7 +6469,7 @@ function App() {
       video.pause();
       video.removeAttribute("src");
       video.load();
-      if (url) URL.revokeObjectURL(url);
+      source?.revoke?.();
       if (video !== autonomousVideoRef.current) video.remove();
     }
   }
