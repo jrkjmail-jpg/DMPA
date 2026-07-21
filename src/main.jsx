@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.0",
-  versionLabel: "v0.7.0",
-  build: "sequential-gate-lab-2026-07-21"
+  version: "0.7.1",
+  versionLabel: "v0.7.1",
+  build: "sequential-last-gate-score-2026-07-21"
 };
 
 const captureEngines = {
@@ -3233,9 +3233,15 @@ function sequentialGateDecision(modelId, result) {
 }
 
 function sequentialFinalScore(steps = []) {
-  const passedScores = steps.filter((step) => step.passed && Number.isFinite(step.score)).map((step) => step.score);
-  if (!passedScores.length) return 0;
-  return clampPercent(averageNumbers(passedScores));
+  const lastCheckedStep = [...steps].reverse().find((step) => Number.isFinite(step.finalScore ?? step.score));
+  if (!lastCheckedStep) return 0;
+  return clampPercent(lastCheckedStep.finalScore ?? lastCheckedStep.score);
+}
+
+function sequentialFinalModelLabel(steps = []) {
+  const lastCheckedStep = steps.at(-1);
+  if (!lastCheckedStep) return "нет проверки";
+  return comparisonModels[lastCheckedStep.modelId]?.title || lastCheckedStep.modelTitle || lastCheckedStep.modelId;
 }
 
 function shuffledItems(items = []) {
@@ -4404,6 +4410,7 @@ function SequentialGateLab({
                 <span>{item.passed ? "прошло всю последовательность" : `остановлено на шаге ${item.stoppedAtStep || 1}`}</span>
               </div>
               <strong>{item.finalScore}%</strong>
+              <span>Итог последнего гейта: {item.finalModelTitle || sequentialFinalModelLabel(item.steps)}</span>
               <p>{item.stopReason || "Все гейты пройдены, видео можно отправлять в более глубокий анализ."}</p>
               <div className="sequential-steps">
                 {item.steps.map((step) => (
@@ -6495,6 +6502,9 @@ function App() {
           stoppedAtStep,
           stopReason,
           finalScore: sequentialFinalScore(steps),
+          finalScoreMode: "last-checked-gate",
+          finalModelId: steps.at(-1)?.modelId || null,
+          finalModelTitle: sequentialFinalModelLabel(steps),
           steps,
           sync: runSync,
           mediaPipeSettings,
