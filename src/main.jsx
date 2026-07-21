@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.2",
-  versionLabel: "v0.7.2",
-  build: "activity-stillness-gate-2026-07-21"
+  version: "0.7.3",
+  versionLabel: "v0.7.3",
+  build: "sequential-scan-failure-card-2026-07-21"
 };
 
 const captureEngines = {
@@ -4448,7 +4448,13 @@ function SequentialGateLab({
             <div className={`sequential-result-card ${item.passed ? "passed" : "stopped"}`} key={item.id}>
               <div>
                 <h3>{item.fileName}</h3>
-                <span>{item.passed ? "прошло всю последовательность" : `остановлено на шаге ${item.stoppedAtStep || 1}`}</span>
+                <span>
+                  {item.passed
+                    ? "прошло всю последовательность"
+                    : item.stopStage === "scan"
+                      ? "технический стоп до моделей"
+                      : `остановлено на шаге ${item.stoppedAtStep || 1}`}
+                </span>
               </div>
               <strong>{item.finalScore}%</strong>
               <span>Итог последнего гейта: {item.finalModelTitle || sequentialFinalModelLabel(item.steps)}</span>
@@ -4456,7 +4462,7 @@ function SequentialGateLab({
               <div className="sequential-steps">
                 {item.steps.map((step) => (
                   <span key={`${item.id}-${step.index}`} className={step.passed ? "passed" : "stopped"}>
-                    {step.index}. {comparisonModels[step.modelId]?.title || step.modelId}: {step.score == null ? "-" : `${step.score}%`}
+                    {step.index}. {step.modelTitle || comparisonModels[step.modelId]?.title || step.modelId}: {step.score == null ? "-" : `${step.score}%`}
                   </span>
                 ))}
               </div>
@@ -6463,8 +6469,59 @@ function App() {
 
       for (const candidateFile of sequentialCandidateFiles) {
         updateProgress(`Сканирую ${candidateFile.name}.`);
-        const candidate = await scanAutonomousFile(candidateFile, candidateFile.name, (message) => updateProgress(message));
-        completedWork += 1;
+        let candidate = null;
+        try {
+          candidate = await scanAutonomousFile(candidateFile, candidateFile.name, (message) => updateProgress(message));
+          completedWork += 1;
+        } catch (err) {
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          const stopReason = `Технический стоп: не удалось загрузить или отсканировать видео. Деталь: ${errorMessage}`;
+          completedWork += 1 + executionOrder.length;
+          const steps = [
+            {
+              index: 1,
+              modelId: "scan",
+              modelTitle: "Сканирование видео",
+              modelVersion: appVersion.versionLabel,
+              score: 0,
+              finalScore: 0,
+              threshold: 0,
+              passed: false,
+              reason: stopReason,
+              error: errorMessage,
+              stage: "scan"
+            }
+          ];
+          const item = {
+            id: crypto.randomUUID(),
+            createdAt: new Date().toISOString(),
+            referenceFileName: sequentialReferenceFile.name,
+            fileName: candidateFile.name,
+            passed: false,
+            stoppedAtStep: 0,
+            stopStage: "scan",
+            stopReason,
+            finalScore: 0,
+            finalScoreMode: "technical-scan-stop",
+            finalModelId: "scan",
+            finalModelTitle: "Сканирование видео",
+            steps,
+            sync: { ready: false, offsetSeconds: 0, confidence: 0, message: "Видео не дошло до аудио-синхронизации." },
+            mediaPipeSettings,
+            appVersion,
+            executionOrder
+          };
+          results.push(item);
+          setSequentialRunState({
+            status: "running",
+            progress: Math.min(99, Math.round((completedWork / Math.max(1, totalWork)) * 100)),
+            message: `${candidateFile.name}: ${stopReason}`,
+            results: [...results],
+            executionOrder
+          });
+          await yieldToBrowser();
+          continue;
+        }
 
         const runSync =
           reference.audio && candidate.audio
