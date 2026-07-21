@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.1",
-  versionLabel: "v0.7.1",
-  build: "sequential-last-gate-score-2026-07-21"
+  version: "0.7.2",
+  versionLabel: "v0.7.2",
+  build: "activity-stillness-gate-2026-07-21"
 };
 
 const captureEngines = {
@@ -1106,7 +1106,8 @@ function compareActivityScans(leftScan, rightScan, sync) {
   const activityMatch = activitySimilarityScore(leftProfile.total.activity, rightProfile.total.activity);
   const amplitudeMatch = activitySimilarityScore(leftProfile.total.amplitudePercent, rightProfile.total.amplitudePercent);
   const phraseMatch = clampPercent(averageNumbers(frameActivity.map((item) => item.score)));
-  const score = clampPercent(activityMatch * 0.52 + phraseMatch * 0.32 + amplitudeMatch * 0.16);
+  const rawScore = clampPercent(activityMatch * 0.5 + phraseMatch * 0.24 + amplitudeMatch * 0.14 + activityJointCoverageScore(leftProfile, rightProfile) * 0.12);
+  const score = applyStillnessActivityGate(rawScore, leftProfile, rightProfile);
   const groupMatches = ["arms", "legs", "torso"].map((group) => ({
     group,
     title: activityGroupTitle(group),
@@ -1155,6 +1156,8 @@ function compareActivityScans(leftScan, rightScan, sync) {
       activityMatch,
       amplitudeMatch,
       phraseMatch,
+      rawActivityScore: rawScore,
+      stillnessGate: activityStillnessGateInfo(leftProfile, rightProfile, rawScore, score),
       trackingOutliersSkipped: anglePairs.skipped,
       referenceOutliersSkipped: anglePairs.leftSkipped,
       userOutliersSkipped: anglePairs.rightSkipped
@@ -1232,6 +1235,8 @@ function buildActivityProfile(scan) {
   const totalWeight = jointProfiles.reduce((sum, item) => sum + item.weight, 0);
   const totalActivity = jointProfiles.reduce((sum, item) => sum + item.activity * item.weight, 0) / Math.max(0.001, totalWeight);
   const totalAmplitude = jointProfiles.reduce((sum, item) => sum + item.amplitudePercent * item.weight, 0) / Math.max(0.001, totalWeight);
+  const activeJoints = jointProfiles.filter((item) => item.activity >= 18).length;
+  const veryActiveJoints = jointProfiles.filter((item) => item.activity >= 34).length;
 
   return {
     frames: normalizedFrames.length,
@@ -1239,7 +1244,9 @@ function buildActivityProfile(scan) {
     duration: Number(((normalizedFrames.at(-1)?.frame.time || 0) - (normalizedFrames[0]?.frame.time || 0)).toFixed(2)),
     total: {
       activity: clampPercent(totalActivity),
-      amplitudePercent: clampPercent(totalAmplitude)
+      amplitudePercent: clampPercent(totalAmplitude),
+      activeJointRatio: Number((activeJoints / Math.max(1, jointProfiles.length)).toFixed(3)),
+      veryActiveJointRatio: Number((veryActiveJoints / Math.max(1, jointProfiles.length)).toFixed(3))
     },
     groups: {
       arms: compactActivityBucket(groups.arms),
@@ -1285,8 +1292,8 @@ function averageJointMovement(previous, current, dt) {
 }
 
 function activityRawToPercent(value) {
-  if (!Number.isFinite(value) || value <= 0.004) return 0;
-  return clampPercent(100 * (1 - Math.exp(-value / 0.62)));
+  if (!Number.isFinite(value) || value <= 0.035) return 0;
+  return clampPercent(100 * (1 - Math.exp(-(value - 0.035) / 0.58)));
 }
 
 function activitySimilarityScore(referenceActivity, userActivity) {
@@ -1294,8 +1301,42 @@ function activitySimilarityScore(referenceActivity, userActivity) {
   const user = clampPercent(userActivity);
   if (reference < 8 && user < 8) return 100;
   if (reference >= 18 && user < 8) return clampPercent(12 + user * 1.4);
+  if (reference >= 25 && user < reference * 0.45) return clampPercent(12 + (user / Math.max(1, reference)) * 45);
+  if (reference >= 35 && user < reference * 0.62) return clampPercent(35 + (user / Math.max(1, reference)) * 32);
   const ratioDiff = Math.abs(reference - user) / Math.max(reference, 18);
-  return clampPercent(100 - ratioDiff * 105);
+  return clampPercent(100 - ratioDiff * 125);
+}
+
+function activityJointCoverageScore(reference, user) {
+  const referenceCoverage = reference.total.activeJointRatio || 0;
+  const userCoverage = user.total.activeJointRatio || 0;
+  if (referenceCoverage < 0.18 && userCoverage < 0.18) return 100;
+  if (referenceCoverage >= 0.35 && userCoverage < 0.18) return 10;
+  return clampPercent(100 - (Math.abs(referenceCoverage - userCoverage) / Math.max(referenceCoverage, 0.25)) * 100);
+}
+
+function applyStillnessActivityGate(rawScore, reference, user) {
+  const referenceActive = reference.total.activity >= 28 && reference.total.activeJointRatio >= 0.3;
+  if (!referenceActive) return rawScore;
+  const userNearlyStill = user.total.activity < 16 || user.total.activeJointRatio < 0.2;
+  if (userNearlyStill) return Math.min(rawScore, 15);
+  if (user.total.activity < reference.total.activity * 0.45) return Math.min(rawScore, 28);
+  if (user.total.activity < reference.total.activity * 0.62 && user.total.activeJointRatio < reference.total.activeJointRatio * 0.65) {
+    return Math.min(rawScore, 42);
+  }
+  return rawScore;
+}
+
+function activityStillnessGateInfo(reference, user, rawScore, finalScore) {
+  return {
+    applied: finalScore < rawScore,
+    rawScore,
+    finalScore,
+    referenceActivity: reference.total.activity,
+    userActivity: user.total.activity,
+    referenceActiveJointRatio: reference.total.activeJointRatio,
+    userActiveJointRatio: user.total.activeJointRatio
+  };
 }
 
 function activityPathAmplitude(points) {
