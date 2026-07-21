@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.12",
-  versionLabel: "v0.7.12",
-  build: "batch-original-file-url-first-2026-07-21"
+  version: "0.7.13",
+  versionLabel: "v0.7.13",
+  build: "auto-batch-history-export-2026-07-21"
 };
 
 const captureEngines = {
@@ -4212,11 +4212,191 @@ function compactLabHistory(items, options = {}) {
 }
 
 function compactLabHistoryItem(item, includeSkeletons = true) {
+  if (item?.entryType === "autonomous-batch" || item?.entryType === "sequential-gate-batch") {
+    return compactBatchHistoryItem(item);
+  }
   return {
     ...item,
     angleRows: sampleEvenly(item?.angleRows || [], maxStoredAngleRows),
     suggestions: (item?.suggestions || []).slice(0, 8),
     skeletons: includeSkeletons ? compactSkeletonBundle(item?.skeletons) : null
+  };
+}
+
+function compactBatchHistoryItem(item) {
+  return {
+    ...item,
+    results: (item?.results || []).map((result) =>
+      item.entryType === "sequential-gate-batch"
+        ? compactSequentialResultForHistory(result)
+        : compactAutonomousResultForHistory(result)
+    ),
+    bestTrials: (item?.bestTrials || []).slice(0, 12)
+  };
+}
+
+function modelMetadataForHistory(modelId) {
+  const model = comparisonModels[modelId] || {};
+  return {
+    id: modelId,
+    title: model.title || model.name || modelId,
+    name: model.name || model.title || modelId,
+    version: model.version || null,
+    versionLabel: model.versionLabel || null,
+    algorithmBuild: model.algorithmBuild || null
+  };
+}
+
+function modelMetadataMapForHistory(modelIds = []) {
+  return Object.fromEntries((modelIds || []).map((modelId) => [modelId, modelMetadataForHistory(modelId)]));
+}
+
+function compactDiagnosticsForHistory(diagnostics = {}) {
+  if (!diagnostics || typeof diagnostics !== "object") return diagnostics || null;
+  const keys = [
+    "confidence",
+    "averageTimeOffsetMs",
+    "syncWindowMs",
+    "weakPoints",
+    "missingJoints",
+    "trackingOutliersSkipped",
+    "referenceOutliersSkipped",
+    "userOutliersSkipped",
+    "activityScore",
+    "referenceActivityScore",
+    "userActivityScore",
+    "activityMatchScore",
+    "activityMismatchPenalty",
+    "movingJointRatio",
+    "referenceMovingJointRatio",
+    "userMovingJointRatio",
+    "stillnessGateApplied",
+    "openAiReady",
+    "openAiModel",
+    "openAiConfidence",
+    "openAiTrackingQualityScore",
+    "openAiEvidenceGateApplied",
+    "openAiEvidenceGateReason",
+    "openAiError"
+  ];
+  return Object.fromEntries(
+    keys
+      .filter((key) => diagnostics[key] != null)
+      .map((key) => {
+        const value = diagnostics[key];
+        return [key, Array.isArray(value) ? value.slice(0, 12) : value];
+      })
+  );
+}
+
+function compactModelDetailsForHistory(modelDetails = {}) {
+  return Object.fromEntries(
+    Object.entries(modelDetails || {}).map(([modelId, details]) => [
+      modelId,
+      {
+        ...modelMetadataForHistory(modelId),
+        ready: Boolean(details?.ready),
+        score: details?.score ?? null,
+        finalScore: details?.finalScore ?? details?.score ?? null,
+        bestScore: details?.bestScore ?? null,
+        worstScore: details?.worstScore ?? null,
+        framesCompared: details?.framesCompared || 0,
+        verdict: details?.verdict || "",
+        suggestions: (details?.suggestions || []).slice(0, 6),
+        diagnostics: compactDiagnosticsForHistory(details?.diagnostics),
+        error: details?.error || null
+      }
+    ])
+  );
+}
+
+function compactSequentialStepForHistory(step = {}) {
+  return {
+    index: step.index,
+    modelId: step.modelId,
+    modelTitle: step.modelTitle,
+    modelVersion: step.modelVersion,
+    score: step.score ?? null,
+    finalScore: step.finalScore ?? step.score ?? null,
+    threshold: step.threshold ?? null,
+    passed: Boolean(step.passed),
+    reason: step.reason || "",
+    errorCode: step.errorCode || null,
+    error: step.error || null,
+    stage: step.stage || null,
+    framesCompared: step.framesCompared || 0,
+    bodyParts: step.bodyParts || null,
+    diagnostics: compactDiagnosticsForHistory(step.diagnostics),
+    verdict: step.verdict || ""
+  };
+}
+
+function compactAutonomousResultForHistory(result = {}) {
+  return {
+    id: result.id,
+    createdAt: result.createdAt,
+    referenceFileName: result.referenceFileName,
+    fileName: result.fileName,
+    caseType: result.caseType,
+    caseLabel: result.caseLabel,
+    target: result.target,
+    ensembleScore: result.ensembleScore ?? null,
+    recommendation: result.recommendation || "",
+    modelScores: result.modelScores || {},
+    modelDetails: compactModelDetailsForHistory(result.modelDetails),
+    sync: result.sync || null,
+    videos: result.videos || null,
+    mediaPipeSettings: result.mediaPipeSettings || null,
+    appVersion: result.appVersion || null,
+    selectedModels: result.selectedModels || []
+  };
+}
+
+function compactSequentialResultForHistory(result = {}) {
+  return {
+    id: result.id,
+    createdAt: result.createdAt,
+    referenceFileName: result.referenceFileName,
+    fileName: result.fileName,
+    passed: Boolean(result.passed),
+    stoppedAtStep: result.stoppedAtStep,
+    stopStage: result.stopStage || null,
+    stopReason: result.stopReason || "",
+    errorCode: result.errorCode || null,
+    errorMessage: result.errorMessage || null,
+    finalScore: result.finalScore ?? null,
+    finalScoreMode: result.finalScoreMode || null,
+    finalModelId: result.finalModelId || null,
+    finalModelTitle: result.finalModelTitle || null,
+    steps: (result.steps || []).map(compactSequentialStepForHistory),
+    sync: result.sync || null,
+    videos: result.videos || null,
+    mediaPipeSettings: result.mediaPipeSettings || null,
+    appVersion: result.appVersion || null,
+    executionOrder: result.executionOrder || []
+  };
+}
+
+function averageBatchScore(results = [], scoreKey = "finalScore") {
+  const scores = (results || [])
+    .map((item) => item?.[scoreKey] ?? item?.ensembleScore ?? null)
+    .filter((score) => Number.isFinite(Number(score)))
+    .map(Number);
+  if (!scores.length) return null;
+  return clampPercent(scores.reduce((sum, score) => sum + score, 0) / scores.length);
+}
+
+function batchHistorySummary(results = [], mode = "autonomous") {
+  const technicalErrors = (results || []).filter((item) => item?.errorCode || item?.stopStage === "scan").length;
+  return {
+    totalVideos: results.length,
+    successfulVideos:
+      mode === "sequential"
+        ? results.filter((item) => item?.passed).length
+        : results.filter((item) => Number.isFinite(Number(item?.ensembleScore))).length,
+    stoppedVideos: mode === "sequential" ? results.filter((item) => item?.passed === false).length : 0,
+    technicalErrors,
+    averageScore: averageBatchScore(results, mode === "sequential" ? "finalScore" : "ensembleScore")
   };
 }
 
@@ -4845,54 +5025,90 @@ function LabHistoryPanel({ history, expectedScore, onExpectedScoreChange, onSave
 
       <div className="history-list">
         {history.length ? (
-          history.slice(0, 8).map((item) => (
-            <article key={item.id} className="history-item">
-              <strong>
-                {item.score}% схожесть{item.expectedScore != null ? ` / ожидалось ${item.expectedScore}%` : ""}
-              </strong>
-              <span>{new Date(item.createdAt).toLocaleString()}</span>
-              <div className="history-tags">
-                <b>{item.appVersionLabel || item.appDetails?.versionLabel || "app без версии"}</b>
-                <b>{comparisonModels[item.comparisonModel]?.title || "Углы"}</b>
-                <b>{item.comparisonModelVersionLabel || item.comparisonModelDetails?.versionLabel || comparisonModels[item.comparisonModel]?.versionLabel || "без версии"}</b>
-                <b>{item.mediaPipeSettings?.modelVariant || "lite"}</b>
-                <b>{item.mediaPipeSettings?.landmarkSet === "full33" ? "33 точки" : "13 точек"}</b>
-                <b>{item.metrics?.framesCompared || 0} кадров</b>
-                <b>{item.saveMode === "auto" ? "авто" : "ручное"}</b>
-                <b>{item.videos?.sameFileCandidate ? "похоже один файл" : "файлы различаются"}</b>
-              </div>
-              <div className="file-facts">
+          history.slice(0, 8).map((item) =>
+            item.entryType === "autonomous-batch" || item.entryType === "sequential-gate-batch" ? (
+              <article key={item.id} className="history-item">
+                <strong>
+                  {item.title || "Пачечный прогон"}: {item.summary?.totalVideos || item.results?.length || 0} видео
+                  {item.summary?.averageScore != null ? ` / средняя оценка ${item.summary.averageScore}%` : ""}
+                </strong>
+                <span>{new Date(item.createdAt).toLocaleString()}</span>
+                <div className="history-tags">
+                  <b>{item.appVersionLabel || item.appDetails?.versionLabel || "app без версии"}</b>
+                  <b>{item.entryType === "sequential-gate-batch" ? "последовательный" : "общий"}</b>
+                  <b>{item.summary?.technicalErrors || 0} тех. ошибок</b>
+                  <b>{item.summary?.successfulVideos || 0} успешно</b>
+                  <b>{item.mediaPipeSettings?.modelVariant || "lite"}</b>
+                  <b>{item.mediaPipeSettings?.landmarkSet === "full33" ? "33 точки" : "13 точек"}</b>
+                  <b>авто база</b>
+                </div>
+                <div className="file-facts">
+                  <p>
+                    <b>Эталон:</b> {item.referenceVideo?.name || item.referenceFileName || "без файла"} |{" "}
+                    {item.referenceVideo?.sizeLabel || "-"} | {item.referenceVideo?.durationLabel || "-"} |{" "}
+                    {item.referenceVideo?.type || "-"}
+                  </p>
+                  <p>
+                    <b>Модели:</b>{" "}
+                    {(item.executionOrder || item.selectedModels || [])
+                      .map((modelId) => item.modelVersions?.[modelId]?.title || comparisonModels[modelId]?.title || modelId)
+                      .join(" -> ")}
+                  </p>
+                </div>
                 <p>
-                  <b>Эталон:</b> {item.videos?.left?.name || item.leftFileName || "без файла"} |{" "}
-                  {item.videos?.left?.sizeLabel || "-"} | {item.videos?.left?.durationLabel || "-"} |{" "}
-                  {item.videos?.left?.type || "-"}
+                  В базе сохранены результаты каждого видео: итог, шаг остановки, версии моделей, sync, параметры MediaPipe,
+                  профиль файла и технические ошибки.
+                </p>
+              </article>
+            ) : (
+              <article key={item.id} className="history-item">
+                <strong>
+                  {item.score}% схожесть{item.expectedScore != null ? ` / ожидалось ${item.expectedScore}%` : ""}
+                </strong>
+                <span>{new Date(item.createdAt).toLocaleString()}</span>
+                <div className="history-tags">
+                  <b>{item.appVersionLabel || item.appDetails?.versionLabel || "app без версии"}</b>
+                  <b>{comparisonModels[item.comparisonModel]?.title || "Углы"}</b>
+                  <b>{item.comparisonModelVersionLabel || item.comparisonModelDetails?.versionLabel || comparisonModels[item.comparisonModel]?.versionLabel || "без версии"}</b>
+                  <b>{item.mediaPipeSettings?.modelVariant || "lite"}</b>
+                  <b>{item.mediaPipeSettings?.landmarkSet === "full33" ? "33 точки" : "13 точек"}</b>
+                  <b>{item.metrics?.framesCompared || 0} кадров</b>
+                  <b>{item.saveMode === "auto" ? "авто" : "ручное"}</b>
+                  <b>{item.videos?.sameFileCandidate ? "похоже один файл" : "файлы различаются"}</b>
+                </div>
+                <div className="file-facts">
+                  <p>
+                    <b>Эталон:</b> {item.videos?.left?.name || item.leftFileName || "без файла"} |{" "}
+                    {item.videos?.left?.sizeLabel || "-"} | {item.videos?.left?.durationLabel || "-"} |{" "}
+                    {item.videos?.left?.type || "-"}
+                  </p>
+                  <p>
+                    <b>Правое:</b> {item.videos?.right?.name || item.rightFileName || "без файла"} |{" "}
+                    {item.videos?.right?.sizeLabel || "-"} | {item.videos?.right?.durationLabel || "-"} |{" "}
+                    {item.videos?.right?.type || "-"}
+                  </p>
+                </div>
+                <p>
+                  Метрики: лучший {item.metrics?.bestScore ?? "-"}%, худший {item.metrics?.worstScore ?? "-"}%, длительность{" "}
+                  {item.metrics?.durationCompared ?? "-"} сек, аудио-смещение {item.sync?.ready ? `${item.sync.offsetSeconds} сек` : "нет"}.
+                </p>
+                {item.expectedScore != null && (
+                  <p>
+                    Ошибка модели относительно ожидания: {Math.abs(item.score - item.expectedScore)} п.п.
+                  </p>
+                )}
+                <p>
+                  Области: {activeRegionLabels(item.mediaPipeSettings?.regions).join(", ")}. FPS скана:{" "}
+                  {item.mediaPipeSettings?.scanFps || "-"}.
                 </p>
                 <p>
-                  <b>Правое:</b> {item.videos?.right?.name || item.rightFileName || "без файла"} |{" "}
-                  {item.videos?.right?.sizeLabel || "-"} | {item.videos?.right?.durationLabel || "-"} |{" "}
-                  {item.videos?.right?.type || "-"}
+                  Скелеты: {item.skeletons?.left?.frames?.length || 0} кадров эталона,{" "}
+                  {item.skeletons?.right?.frames?.length || 0} кадров правого,{" "}
+                  {item.skeletons?.synchronizedPairs?.length || 0} синхронных пар.
                 </p>
-              </div>
-              <p>
-                Метрики: лучший {item.metrics?.bestScore ?? "-"}%, худший {item.metrics?.worstScore ?? "-"}%, длительность{" "}
-                {item.metrics?.durationCompared ?? "-"} сек, аудио-смещение {item.sync?.ready ? `${item.sync.offsetSeconds} сек` : "нет"}.
-              </p>
-              {item.expectedScore != null && (
-                <p>
-                  Ошибка модели относительно ожидания: {Math.abs(item.score - item.expectedScore)} п.п.
-                </p>
-              )}
-              <p>
-                Области: {activeRegionLabels(item.mediaPipeSettings?.regions).join(", ")}. FPS скана:{" "}
-                {item.mediaPipeSettings?.scanFps || "-"}.
-              </p>
-              <p>
-                Скелеты: {item.skeletons?.left?.frames?.length || 0} кадров эталона,{" "}
-                {item.skeletons?.right?.frames?.length || 0} кадров правого,{" "}
-                {item.skeletons?.synchronizedPairs?.length || 0} синхронных пар.
-              </p>
-            </article>
-          ))
+              </article>
+            )
+          )
         ) : (
           <p className="empty-history">После полного анализа сохраняйте примеры, чтобы собрать датасет для настройки алгоритма.</p>
         )}
@@ -6232,6 +6448,48 @@ function App() {
     }
   }, [captureEngine]);
 
+  function saveBatchRunToHistory({
+    entryType,
+    title,
+    referenceFile,
+    referenceScan,
+    referenceAudio,
+    candidateFiles,
+    results,
+    executionOrder,
+    bestTrials = []
+  }) {
+    const mode = entryType === "sequential-gate-batch" ? "sequential" : "autonomous";
+    const compactResults =
+      mode === "sequential"
+        ? (results || []).map(compactSequentialResultForHistory)
+        : (results || []).map(compactAutonomousResultForHistory);
+    const entry = {
+      id: crypto.randomUUID(),
+      entryType,
+      schemaVersion: 2,
+      createdAt: new Date().toISOString(),
+      saveMode: "auto-batch",
+      title,
+      appVersion: appVersion.version,
+      appVersionLabel: appVersion.versionLabel,
+      appBuild: appVersion.build,
+      appDetails: appVersion,
+      referenceFileName: referenceFile?.name || "",
+      referenceVideo: fileProfile(referenceFile, referenceScan, referenceAudio),
+      candidateFileNames: (candidateFiles || []).map((file) => file.name),
+      candidateCount: candidateFiles?.length || 0,
+      executionOrder,
+      selectedModels: executionOrder,
+      modelVersions: modelMetadataMapForHistory(executionOrder),
+      mediaPipeSettings,
+      summary: batchHistorySummary(compactResults, mode),
+      bestTrials,
+      results: compactResults
+    };
+    setLabHistory((items) => compactLabHistory([entry, ...items]));
+  }
+
   const importMotionCapCsv = useCallback((side, file) => {
     if (!file) return;
     setMotionCapStatus(`Читаю ${file.name}...`);
@@ -6665,6 +6923,14 @@ function App() {
           modelScores,
           modelDetails,
           sync: runSync,
+          videos: {
+            reference: fileProfile(autonomousReferenceFile, reference.scan, reference.audio),
+            candidate: fileProfile(candidateFile, candidate.scan, candidate.audio),
+            sameFileCandidate: sameFileCandidate(
+              fileProfile(autonomousReferenceFile, reference.scan, reference.audio),
+              fileProfile(candidateFile, candidate.scan, candidate.audio)
+            )
+          },
           mediaPipeSettings,
           appVersion,
           selectedModels: executionOrder
@@ -6683,6 +6949,17 @@ function App() {
       }
 
       const bestTrials = buildAutonomousTrials(results, autonomousSelectedModels);
+      saveBatchRunToHistory({
+        entryType: "autonomous-batch",
+        title: "Общий автономный анализ пачки видео",
+        referenceFile: autonomousReferenceFile,
+        referenceScan: reference.scan,
+        referenceAudio: reference.audio,
+        candidateFiles: autonomousCandidateFiles,
+        results,
+        executionOrder,
+        bestTrials
+      });
       setAutonomousRunState({
         status: "done",
         progress: 100,
@@ -6781,6 +7058,11 @@ function App() {
             finalModelTitle: "Сканирование видео",
             steps,
             sync: { ready: false, offsetSeconds: 0, confidence: 0, message: "Видео не дошло до аудио-синхронизации." },
+            videos: {
+              reference: fileProfile(sequentialReferenceFile, reference.scan, reference.audio),
+              candidate: fileProfile(candidateFile, null, null),
+              sameFileCandidate: false
+            },
             mediaPipeSettings,
             appVersion,
             executionOrder
@@ -6879,6 +7161,14 @@ function App() {
           finalModelTitle: sequentialFinalModelLabel(steps),
           steps,
           sync: runSync,
+          videos: {
+            reference: fileProfile(sequentialReferenceFile, reference.scan, reference.audio),
+            candidate: fileProfile(candidateFile, candidate.scan, candidate.audio),
+            sameFileCandidate: sameFileCandidate(
+              fileProfile(sequentialReferenceFile, reference.scan, reference.audio),
+              fileProfile(candidateFile, candidate.scan, candidate.audio)
+            )
+          },
           mediaPipeSettings,
           appVersion,
           executionOrder
@@ -6894,6 +7184,16 @@ function App() {
         await yieldToBrowser();
       }
 
+      saveBatchRunToHistory({
+        entryType: "sequential-gate-batch",
+        title: "Последовательный автономный анализ",
+        referenceFile: sequentialReferenceFile,
+        referenceScan: reference.scan,
+        referenceAudio: reference.audio,
+        candidateFiles: sequentialCandidateFiles,
+        results,
+        executionOrder
+      });
       setSequentialRunState({
         status: "done",
         progress: 100,
