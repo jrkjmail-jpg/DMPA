@@ -560,6 +560,32 @@ h3 {
   border-color: #9fc8f3;
 }
 
+.video-pane.fullscreen-pane {
+  background: #f8fbff;
+  border-radius: 0;
+  inset: 0;
+  overflow: auto;
+  padding: max(14px, env(safe-area-inset-top)) 14px max(14px, env(safe-area-inset-bottom));
+  position: fixed;
+  z-index: 1000;
+}
+
+.video-pane.fullscreen-pane .pane-header,
+.video-pane.fullscreen-pane .source-toolbar,
+.video-pane.fullscreen-pane .scan-meta {
+  display: none;
+}
+
+.video-pane.fullscreen-pane .stage {
+  aspect-ratio: auto;
+  height: min(72vh, 100vw);
+  margin: 0 0 12px;
+}
+
+.video-pane.fullscreen-pane .controls {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .stage {
   aspect-ratio: 16 / 9;
   background: #111927;
@@ -1629,6 +1655,19 @@ h3 {
   }
 
   .controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .video-pane.fullscreen-pane {
+    padding-left: max(10px, env(safe-area-inset-left));
+    padding-right: max(10px, env(safe-area-inset-right));
+  }
+
+  .video-pane.fullscreen-pane .stage {
+    height: min(70vh, 112vw);
+  }
+
+  .video-pane.fullscreen-pane .controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 

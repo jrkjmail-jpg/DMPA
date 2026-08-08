@@ -8,7 +8,7 @@ import React, {
   useState
 } from "react";
 import { createRoot } from "react-dom/client";
-import { Camera, FileVideo, Pause, Play, RotateCcw, ScanLine, Sparkles, Wand2, Waves } from "lucide-react";
+import { Camera, FileVideo, Maximize2, Minimize2, Pause, Play, RotateCcw, ScanLine, Sparkles, Wand2, Waves } from "lucide-react";
 import { DrawingUtils, FilesetResolver, HandLandmarker, PoseLandmarker } from "@mediapipe/tasks-vision";
 import { compareSkeletons_2026_07_06 } from "./skeletonComparison20260706.mjs";
 import { compareSkeletons_2026_07_12 } from "./skeletonComparison20260712.mjs";
@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.16",
-  versionLabel: "v0.7.16",
-  build: "detailed-live-hand-landmarks-2026-08-08"
+  version: "0.7.17",
+  versionLabel: "v0.7.17",
+  build: "mobile-live-camera-fullscreen-2026-08-08"
 };
 
 const captureEngines = {
@@ -260,6 +260,10 @@ const comparisonModelKey = "dmpa.comparison.model.v1";
 const maxScanFrames = 3600;
 const mobileMaxScanFrames = 1200;
 const maxOverlayPreviewFrames = 240;
+const liveDetectionIntervals = {
+  desktopMs: 34,
+  mobileCameraMs: 130
+};
 
 const landmarkNames = {
   0: "нос",
@@ -3830,15 +3834,18 @@ const VideoPane = forwardRef(function VideoPane(
   },
   ref
 ) {
+  const sectionRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(0);
   const lastVideoTimeRef = useRef(-1);
+  const lastLiveDetectionAtRef = useRef(0);
   const reliableHandsRef = useRef({ hands: [], holdFrames: 0 });
   const [sourceName, setSourceName] = useState("Источник не выбран");
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState("empty");
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState("");
@@ -3908,6 +3915,16 @@ const VideoPane = forwardRef(function VideoPane(
     }
 
     if (lastVideoTimeRef.current !== video.currentTime) {
+      const now = performance.now();
+      const liveInterval = mode === "camera" && isMemoryConstrainedDevice()
+        ? liveDetectionIntervals.mobileCameraMs
+        : liveDetectionIntervals.desktopMs;
+      const canRunLiveDetection = now - lastLiveDetectionAtRef.current >= liveInterval;
+      if (!scan?.frames?.length && !liveDetectionPaused && landmarker && !canRunLiveDetection) {
+        rafRef.current = requestAnimationFrame(analyzeFrame);
+        return;
+      }
+      lastLiveDetectionAtRef.current = now;
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const isInsideAnalysisRange =
@@ -3976,12 +3993,20 @@ const VideoPane = forwardRef(function VideoPane(
     }
 
     rafRef.current = requestAnimationFrame(analyzeFrame);
-  }, [analysisRange, handLandmarker, landmarker, liveDetectionPaused, mediaPipeSettings?.regions?.hands, nextTimestamp, onPose, scan, showAnalysisRange, side, specs]);
+  }, [analysisRange, handLandmarker, landmarker, liveDetectionPaused, mediaPipeSettings?.regions?.hands, mode, nextTimestamp, onPose, scan, showAnalysisRange, side, specs]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(analyzeFrame);
     return () => cancelAnimationFrame(rafRef.current);
   }, [analyzeFrame]);
+
+  useEffect(() => {
+    function syncFullscreenState() {
+      setIsFullscreen(Boolean(document.fullscreenElement === sectionRef.current));
+    }
+    document.addEventListener("fullscreenchange", syncFullscreenState);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
+  }, []);
 
   useEffect(() => stopCamera, [stopCamera]);
 
@@ -4082,6 +4107,34 @@ const VideoPane = forwardRef(function VideoPane(
     if (video) video.muted = nextMuted;
   }
 
+  async function toggleFullscreen() {
+    const section = sectionRef.current;
+    if (!section) return;
+    if (isFullscreen && document.fullscreenElement !== section) {
+      setIsFullscreen(false);
+      return;
+    }
+    try {
+      if (document.fullscreenElement === section) {
+        await document.exitFullscreen?.();
+        setIsFullscreen(false);
+        return;
+      }
+      if (section.requestFullscreen) {
+        await section.requestFullscreen();
+        setIsFullscreen(true);
+        return;
+      }
+    } catch (err) {
+      console.warn("Fullscreen API unavailable, using in-page mode.", err);
+    }
+    setIsFullscreen((value) => {
+      const next = !value;
+      if (next) window.setTimeout(() => section.scrollIntoView({ block: "start", behavior: "smooth" }), 50);
+      return next;
+    });
+  }
+
   async function scanSkeleton() {
     const video = videoRef.current;
     if (!video || mode === "empty") {
@@ -4118,7 +4171,7 @@ const VideoPane = forwardRef(function VideoPane(
   }
 
   return (
-    <section className={`video-pane ${active || scan?.trackedFrames ? "active" : ""}`}>
+    <section ref={sectionRef} className={`video-pane ${active || scan?.trackedFrames ? "active" : ""} ${isFullscreen ? "fullscreen-pane" : ""}`}>
       <header className="pane-header">
         <div>
           <p className="eyebrow">{title}</p>
@@ -4244,6 +4297,10 @@ const VideoPane = forwardRef(function VideoPane(
         </button>
         <button type="button" onClick={toggleSound}>
           {isMuted ? "Включить звук" : "Выключить звук"}
+        </button>
+        <button type="button" onClick={toggleFullscreen}>
+          {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+          {isFullscreen ? "Выйти" : "На весь экран"}
         </button>
         <button type="button" onClick={reset}>
           <RotateCcw size={18} />
