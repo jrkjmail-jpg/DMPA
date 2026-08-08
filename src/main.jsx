@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.18",
-  versionLabel: "v0.7.18",
-  build: "fast-mobile-live-pose-2026-08-08"
+  version: "0.7.19",
+  versionLabel: "v0.7.19",
+  build: "disable-mobile-live-hands-freeze-2026-08-08"
 };
 
 const captureEngines = {
@@ -3966,7 +3966,8 @@ const VideoPane = forwardRef(function VideoPane(
       const landmarks = result.landmarks?.[0] || [];
       if (landmarks.length && isInsideAnalysisRange) drawVideoSkeleton(ctx, landmarks, canvas, video, side);
       let hands = [];
-      if (handLandmarker && isInsideAnalysisRange) {
+      const allowLiveHands = !(mode === "camera" && isMemoryConstrainedDevice());
+      if (allowLiveHands && handLandmarker && isInsideAnalysisRange) {
         const handInterval = mode === "camera" && isMemoryConstrainedDevice()
           ? liveDetectionIntervals.mobileCameraHandsMs
           : liveDetectionIntervals.desktopMs;
