@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.17",
-  versionLabel: "v0.7.17",
-  build: "mobile-live-camera-fullscreen-2026-08-08"
+  version: "0.7.18",
+  versionLabel: "v0.7.18",
+  build: "fast-mobile-live-pose-2026-08-08"
 };
 
 const captureEngines = {
@@ -262,7 +262,8 @@ const mobileMaxScanFrames = 1200;
 const maxOverlayPreviewFrames = 240;
 const liveDetectionIntervals = {
   desktopMs: 34,
-  mobileCameraMs: 130
+  mobileCameraPoseMs: 66,
+  mobileCameraHandsMs: 260
 };
 
 const landmarkNames = {
@@ -3841,6 +3842,7 @@ const VideoPane = forwardRef(function VideoPane(
   const rafRef = useRef(0);
   const lastVideoTimeRef = useRef(-1);
   const lastLiveDetectionAtRef = useRef(0);
+  const lastHandDetectionAtRef = useRef(0);
   const reliableHandsRef = useRef({ hands: [], holdFrames: 0 });
   const [sourceName, setSourceName] = useState("Источник не выбран");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -3917,7 +3919,7 @@ const VideoPane = forwardRef(function VideoPane(
     if (lastVideoTimeRef.current !== video.currentTime) {
       const now = performance.now();
       const liveInterval = mode === "camera" && isMemoryConstrainedDevice()
-        ? liveDetectionIntervals.mobileCameraMs
+        ? liveDetectionIntervals.mobileCameraPoseMs
         : liveDetectionIntervals.desktopMs;
       const canRunLiveDetection = now - lastLiveDetectionAtRef.current >= liveInterval;
       if (!scan?.frames?.length && !liveDetectionPaused && landmarker && !canRunLiveDetection) {
@@ -3965,16 +3967,25 @@ const VideoPane = forwardRef(function VideoPane(
       if (landmarks.length && isInsideAnalysisRange) drawVideoSkeleton(ctx, landmarks, canvas, video, side);
       let hands = [];
       if (handLandmarker && isInsideAnalysisRange) {
-        const handResult = handLandmarker.detectForVideo(video, frameTimestamp);
-        const reliableHands = reliableHandsFromResult(handResult, reliableHandsRef.current.hands);
-        if (reliableHands.length) {
-          hands = reliableHands;
-          reliableHandsRef.current = { hands, holdFrames: handTrackingSettings.holdFrames };
-        } else if (reliableHandsRef.current.hands.length && reliableHandsRef.current.holdFrames > 0) {
+        const handInterval = mode === "camera" && isMemoryConstrainedDevice()
+          ? liveDetectionIntervals.mobileCameraHandsMs
+          : liveDetectionIntervals.desktopMs;
+        const canRunHandDetection = now - lastHandDetectionAtRef.current >= handInterval;
+        if (canRunHandDetection) {
+          lastHandDetectionAtRef.current = now;
+          const handResult = handLandmarker.detectForVideo(video, frameTimestamp);
+          const reliableHands = reliableHandsFromResult(handResult, reliableHandsRef.current.hands);
+          if (reliableHands.length) {
+            hands = reliableHands;
+            reliableHandsRef.current = { hands, holdFrames: handTrackingSettings.holdFrames };
+          } else if (reliableHandsRef.current.hands.length && reliableHandsRef.current.holdFrames > 0) {
+            hands = reliableHandsRef.current.hands;
+            reliableHandsRef.current = { hands, holdFrames: reliableHandsRef.current.holdFrames - 1 };
+          } else {
+            reliableHandsRef.current = { hands: [], holdFrames: 0 };
+          }
+        } else if (reliableHandsRef.current.hands.length) {
           hands = reliableHandsRef.current.hands;
-          reliableHandsRef.current = { hands, holdFrames: reliableHandsRef.current.holdFrames - 1 };
-        } else {
-          reliableHandsRef.current = { hands: [], holdFrames: 0 };
         }
         if (hands.length) drawVideoHands(ctx, hands, canvas, video, side);
       } else {
@@ -4019,7 +4030,13 @@ const VideoPane = forwardRef(function VideoPane(
     setError("");
     try {
       stopCamera();
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false });
+      const mobileSafe = isMemoryConstrainedDevice();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: mobileSafe
+          ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } }
+          : { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 60 } },
+        audio: false
+      });
       streamRef.current = stream;
       const video = videoRef.current;
       video.srcObject = stream;
