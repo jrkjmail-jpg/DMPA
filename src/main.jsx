@@ -3223,12 +3223,17 @@ function zNormalize(values) {
 }
 
 function formatTime(seconds) {
-  const safeSeconds = Math.max(0, seconds || 0);
+  const safeSeconds = Number.isFinite(Number(seconds)) ? Math.max(0, Number(seconds)) : 0;
   const minutes = Math.floor(safeSeconds / 60);
   const rest = Math.floor(safeSeconds % 60)
     .toString()
     .padStart(2, "0");
   return `${minutes}:${rest}`;
+}
+
+function finiteVideoDuration(video) {
+  const duration = Number(video?.duration || 0);
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
 }
 
 function formatSeconds(seconds, digits = 1) {
@@ -3986,6 +3991,8 @@ const VideoPane = forwardRef(function VideoPane(
       setIsMuted(true);
       await video.play();
       setIsPlaying(true);
+      setCurrentTime(0);
+      setDuration(0);
       setMode("camera");
       setSourceName("Камера ноутбука");
       setShowCameraPrompt(false);
@@ -4024,7 +4031,7 @@ const VideoPane = forwardRef(function VideoPane(
 
   function handleLoadedMetadata() {
     const video = videoRef.current;
-    const nextDuration = video?.duration || 0;
+    const nextDuration = finiteVideoDuration(video);
     setDuration(nextDuration);
     if (showAnalysisRange && nextDuration && onAnalysisRangeChange) {
       onAnalysisRangeChange({ start: 0, end: Number(nextDuration.toFixed(2)) });
@@ -4155,7 +4162,7 @@ const VideoPane = forwardRef(function VideoPane(
         )}
       </div>
 
-      {duration > 0 && (
+      {mode === "file" && duration > 0 && (
         <div className="playback-timeline">
           <div className="time-row">
             <span>{formatTime(currentTime)}</span>
@@ -4165,7 +4172,7 @@ const VideoPane = forwardRef(function VideoPane(
         </div>
       )}
 
-      {showAnalysisRange && duration > 0 && analysisRange && (
+      {mode === "file" && showAnalysisRange && duration > 0 && analysisRange && (
         <div className="analysis-range">
           <div className="range-header">
             <strong>Диапазон анализа скелета</strong>
