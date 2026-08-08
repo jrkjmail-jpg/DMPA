@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.20",
-  versionLabel: "v0.7.20",
-  build: "reliable-mobile-hands-off-2026-08-08"
+  version: "0.7.21",
+  versionLabel: "v0.7.21",
+  build: "unmirror-camera-preview-2026-08-08"
 };
 
 const captureEngines = {
@@ -4234,7 +4234,7 @@ const VideoPane = forwardRef(function VideoPane(
         </div>
       )}
 
-      <div className="stage">
+      <div className={`stage ${mode === "camera" ? "camera-unmirror" : ""}`}>
         <video
           ref={videoRef}
           playsInline

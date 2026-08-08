@@ -612,6 +612,11 @@ h3 {
   pointer-events: none;
 }
 
+.stage.camera-unmirror video,
+.stage.camera-unmirror canvas {
+  transform: scaleX(-1);
+}
+
 .playback-timeline {
   border: 1px solid #dbe4ef;
   border-radius: 8px;
