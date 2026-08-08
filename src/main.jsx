@@ -9,7 +9,7 @@ import React, {
 } from "react";
 import { createRoot } from "react-dom/client";
 import { Camera, FileVideo, Pause, Play, RotateCcw, ScanLine, Sparkles, Wand2, Waves } from "lucide-react";
-import { DrawingUtils, FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
+import { DrawingUtils, FilesetResolver, HandLandmarker, PoseLandmarker } from "@mediapipe/tasks-vision";
 import { compareSkeletons_2026_07_06 } from "./skeletonComparison20260706.mjs";
 import { compareSkeletons_2026_07_12 } from "./skeletonComparison20260712.mjs";
 import { compareSkeletons_2026_07_13, filterSkeletonFrames_2026_07_13 } from "./skeletonComparison20260713.mjs";
@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.14",
-  versionLabel: "v0.7.14",
-  build: "batch-video-decoder-kick-2026-07-21"
+  version: "0.7.15",
+  versionLabel: "v0.7.15",
+  build: "live-mediapipe-hands-layer-2026-08-08"
 };
 
 const captureEngines = {
@@ -49,6 +49,15 @@ const modelUrls = {
   lite: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
   full: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",
   heavy: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
+};
+
+const handModelUrl = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task";
+
+const handTrackingSettings = {
+  minHandConfidence: 0.65,
+  minVisibleHandPoints: 14,
+  holdFrames: 2,
+  maxJumpDistance: 0.25
 };
 
 const defaultMediaPipeSettings = {
@@ -83,7 +92,7 @@ const mediaPipeHelp = {
   minTrackingConfidence: "Минимальная уверенность сопровождения уже найденной позы между кадрами. Выше значение уменьшает шум, но может чаще терять тело.",
   regions: "Какие зоны тела учитывать в сравнении и сохранять как настройки эксперимента.",
   hands:
-    "MediaPipe Hands нужен для детального анализа кистей и пальцев. Сейчас это отдельный флаг лаборатории; базовые запястья и пальцы Pose уже есть в 33 точках.",
+    "MediaPipe Hands добавляет live-слой кистей и пальцев. Пальцы показываются только когда ладонь найдена уверенно и точки не прыгают.",
   face:
     "MediaPipe Face Landmarker нужен для детального анализа лица. Сейчас это отдельный флаг лаборатории; базовые точки лица Pose доступны только грубо."
 };
@@ -427,6 +436,56 @@ function drawVideoSkeleton(ctx, landmarks, canvas, video, side) {
     fillColor: color,
     radius: Math.max(1.2, 2.4 * visualScale)
   });
+}
+
+function drawVideoHands(ctx, hands, canvas, video, side) {
+  if (!hands?.length || !canvas?.width || !canvas?.height || !video?.videoWidth || !video?.videoHeight) return;
+  const rect = containRect(canvas.width, canvas.height, video.videoWidth, video.videoHeight);
+  const visualScale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+  const color = side === "left" ? "#f59e0b" : "#c084fc";
+  const projectedHands = hands.map((hand) => projectLandmarksToCanvas(hand.landmarks, rect, canvas.width, canvas.height));
+  const drawingUtils = new DrawingUtils(ctx);
+  projectedHands.forEach((landmarks) => {
+    drawingUtils.drawConnectors(landmarks, HandLandmarker.HAND_CONNECTIONS, {
+      color,
+      lineWidth: Math.max(1, 2.2 * visualScale)
+    });
+    drawingUtils.drawLandmarks(landmarks, {
+      color,
+      fillColor: color,
+      radius: Math.max(0.8, 1.7 * visualScale)
+    });
+  });
+}
+
+function reliableHandsFromResult(result, previousHands = []) {
+  const landmarksList = result?.landmarks || [];
+  const handednesses = result?.handednesses || [];
+  return landmarksList
+    .map((landmarks, index) => {
+      const score = handednesses[index]?.[0]?.score ?? 1;
+      const label = handednesses[index]?.[0]?.categoryName || `hand-${index}`;
+      const visiblePoints = (landmarks || []).filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y)).length;
+      if (score < handTrackingSettings.minHandConfidence || visiblePoints < handTrackingSettings.minVisibleHandPoints) return null;
+      const previous = previousHands.find((hand) => hand.label === label) || previousHands[index];
+      if (previous?.landmarks?.length && averageHandJump(previous.landmarks, landmarks) > handTrackingSettings.maxJumpDistance) {
+        return null;
+      }
+      return { label, score, landmarks };
+    })
+    .filter(Boolean);
+}
+
+function averageHandJump(previous = [], current = []) {
+  const count = Math.min(previous.length, current.length);
+  if (!count) return 0;
+  let sum = 0;
+  for (let index = 0; index < count; index += 1) {
+    const a = previous[index];
+    const b = current[index];
+    sum += Math.hypot((a?.x || 0) - (b?.x || 0), (a?.y || 0) - (b?.y || 0));
+  }
+  return sum / count;
 }
 
 function comparePoseFrames(left, right, regions = defaultMediaPipeSettings.regions, options = {}) {
@@ -2673,9 +2732,24 @@ function detectorOptions(settings, runningMode) {
   };
 }
 
+function handDetectorOptions(settings, runningMode) {
+  return {
+    baseOptions: {
+      modelAssetPath: handModelUrl,
+      delegate: settings.delegate
+    },
+    runningMode,
+    numHands: 2,
+    minHandDetectionConfidence: handTrackingSettings.minHandConfidence,
+    minHandPresenceConfidence: handTrackingSettings.minHandConfidence,
+    minTrackingConfidence: Math.max(handTrackingSettings.minHandConfidence, settings.minTrackingConfidence || 0)
+  };
+}
+
 function usePoseLandmarker(settings) {
   const [landmarker, setLandmarker] = useState(null);
   const [scanLandmarker, setScanLandmarker] = useState(null);
+  const [handLandmarker, setHandLandmarker] = useState(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -2683,14 +2757,19 @@ function usePoseLandmarker(settings) {
     async function boot() {
       setLandmarker(null);
       setScanLandmarker(null);
+      setHandLandmarker(null);
       setError("");
       try {
         const fileset = await FilesetResolver.forVisionTasks(wasmBase);
         const detector = await PoseLandmarker.createFromOptions(fileset, detectorOptions(settings, "VIDEO"));
         const scanDetector = await PoseLandmarker.createFromOptions(fileset, detectorOptions(settings, "IMAGE"));
+        const handDetector = settings.regions?.hands
+          ? await HandLandmarker.createFromOptions(fileset, handDetectorOptions(settings, "VIDEO"))
+          : null;
         if (!cancelled) {
           setLandmarker(detector);
           setScanLandmarker(scanDetector);
+          setHandLandmarker(handDetector);
         }
       } catch (err) {
         setError("Не удалось загрузить MediaPipe. Проверьте интернет или CDN-доступ.");
@@ -2702,10 +2781,11 @@ function usePoseLandmarker(settings) {
       cancelled = true;
       landmarker?.close?.();
       scanLandmarker?.close?.();
+      handLandmarker?.close?.();
     };
   }, [settings]);
 
-  return { landmarker, scanLandmarker, error };
+  return { landmarker, scanLandmarker, handLandmarker, error };
 }
 
 function waitForVideoEvent(video, eventName, timeoutMs = 5000) {
@@ -3718,6 +3798,7 @@ const VideoPane = forwardRef(function VideoPane(
     side,
     landmarker,
     scanLandmarker,
+    handLandmarker,
     nextTimestamp,
     onPose,
     onFile,
@@ -3737,6 +3818,7 @@ const VideoPane = forwardRef(function VideoPane(
   const streamRef = useRef(null);
   const rafRef = useRef(0);
   const lastVideoTimeRef = useRef(-1);
+  const reliableHandsRef = useRef({ hands: [], holdFrames: 0 });
   const [sourceName, setSourceName] = useState("Источник не выбран");
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState("empty");
@@ -3821,9 +3903,11 @@ const VideoPane = forwardRef(function VideoPane(
           !scan.range || (video.currentTime >= scan.range.start && video.currentTime <= scan.range.end);
         const savedFrame = isInsideScanRange ? nearestScanFrame(scan.frames, video.currentTime) : null;
         if (savedFrame?.landmarks?.length) drawVideoSkeleton(ctx, savedFrame.landmarks, canvas, video, side);
+        reliableHandsRef.current = { hands: [], holdFrames: 0 };
         onPose({
           landmarks: savedFrame?.landmarks || [],
           angles: savedFrame?.angles || {},
+          hands: [],
           timestamp: video.currentTime,
           confidence: savedFrame?.confidence || 0,
           source: "scan"
@@ -3834,19 +3918,39 @@ const VideoPane = forwardRef(function VideoPane(
       }
 
       if (liveDetectionPaused || !landmarker) {
-        onPose({ landmarks: [], angles: {}, timestamp: video.currentTime, confidence: 0, source: "paused" });
+        reliableHandsRef.current = { hands: [], holdFrames: 0 };
+        onPose({ landmarks: [], angles: {}, hands: [], timestamp: video.currentTime, confidence: 0, source: "paused" });
         lastVideoTimeRef.current = video.currentTime;
         rafRef.current = requestAnimationFrame(analyzeFrame);
         return;
       }
 
-      const result = landmarker.detectForVideo(video, nextTimestamp());
+      const frameTimestamp = nextTimestamp();
+      const result = landmarker.detectForVideo(video, frameTimestamp);
       const landmarks = result.landmarks?.[0] || [];
       if (landmarks.length && isInsideAnalysisRange) drawVideoSkeleton(ctx, landmarks, canvas, video, side);
+      let hands = [];
+      if (mediaPipeSettings?.regions?.hands && handLandmarker && isInsideAnalysisRange) {
+        const handResult = handLandmarker.detectForVideo(video, frameTimestamp);
+        const reliableHands = reliableHandsFromResult(handResult, reliableHandsRef.current.hands);
+        if (reliableHands.length) {
+          hands = reliableHands;
+          reliableHandsRef.current = { hands, holdFrames: handTrackingSettings.holdFrames };
+        } else if (reliableHandsRef.current.hands.length && reliableHandsRef.current.holdFrames > 0) {
+          hands = reliableHandsRef.current.hands;
+          reliableHandsRef.current = { hands, holdFrames: reliableHandsRef.current.holdFrames - 1 };
+        } else {
+          reliableHandsRef.current = { hands: [], holdFrames: 0 };
+        }
+        if (hands.length) drawVideoHands(ctx, hands, canvas, video, side);
+      } else {
+        reliableHandsRef.current = { hands: [], holdFrames: 0 };
+      }
 
       onPose({
         landmarks: isInsideAnalysisRange ? landmarks : [],
         angles: isInsideAnalysisRange ? poseAngles(landmarks, specs) : {},
+        hands: isInsideAnalysisRange ? hands : [],
         timestamp: video.currentTime,
         confidence: landmarks.length && isInsideAnalysisRange ? averageVisibility(landmarks) : 0,
         source: "live"
@@ -3855,7 +3959,7 @@ const VideoPane = forwardRef(function VideoPane(
     }
 
     rafRef.current = requestAnimationFrame(analyzeFrame);
-  }, [analysisRange, landmarker, liveDetectionPaused, nextTimestamp, onPose, scan, showAnalysisRange, side, specs]);
+  }, [analysisRange, handLandmarker, landmarker, liveDetectionPaused, mediaPipeSettings?.regions?.hands, nextTimestamp, onPose, scan, showAnalysisRange, side, specs]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(analyzeFrame);
@@ -6400,7 +6504,7 @@ function App() {
     return comparisonModels[savedModel] ? savedModel : "angles";
   });
   const [hybridMethods, setHybridMethods] = useState(() => loadHybridMethodSettings());
-  const { landmarker, scanLandmarker, error } = usePoseLandmarker(mediaPipeSettings);
+  const { landmarker, scanLandmarker, handLandmarker, error } = usePoseLandmarker(mediaPipeSettings);
   const leftVideoRef = useRef(null);
   const rightVideoRef = useRef(null);
   const autonomousVideoRef = useRef(null);
@@ -7382,8 +7486,10 @@ function App() {
           <Sparkles size={18} />
           {captureEngine === "motioncap"
             ? "MotionCap импорт CSV"
-            : landmarker && scanLandmarker
-              ? "MediaPipe готов"
+            : landmarker && scanLandmarker && (!mediaPipeSettings.regions.hands || handLandmarker)
+              ? mediaPipeSettings.regions.hands
+                ? "MediaPipe Pose + Hands готов"
+                : "MediaPipe готов"
               : "Загрузка модели..."}
         </div>
       </header>
@@ -7419,7 +7525,7 @@ function App() {
             message: "Настройки MediaPipe изменены. Пересканируйте оба видео для новой версии датасета."
           });
         }}
-        isReady={Boolean(landmarker && scanLandmarker)}
+        isReady={Boolean(landmarker && scanLandmarker && (!mediaPipeSettings.regions.hands || handLandmarker))}
       />
 
       <ComparisonModelPanel
@@ -7504,6 +7610,7 @@ function App() {
           side="left"
           landmarker={landmarker}
           scanLandmarker={scanLandmarker}
+          handLandmarker={handLandmarker}
           nextTimestamp={nextMediaPipeTimestamp}
           onPose={setLeftPose}
           onFile={(file) => {
@@ -7538,6 +7645,7 @@ function App() {
           side="right"
           landmarker={landmarker}
           scanLandmarker={scanLandmarker}
+          handLandmarker={handLandmarker}
           nextTimestamp={nextMediaPipeTimestamp}
           onPose={setRightPose}
           onFile={(file) => {
