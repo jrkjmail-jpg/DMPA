@@ -25,9 +25,9 @@ const maxStoredSkeletonFrames = 80;
 const maxStoredAngleRows = 60;
 const appVersion = {
   name: "DMPA Lab",
-  version: "0.7.19",
-  versionLabel: "v0.7.19",
-  build: "disable-mobile-live-hands-freeze-2026-08-08"
+  version: "0.7.20",
+  versionLabel: "v0.7.20",
+  build: "reliable-mobile-hands-off-2026-08-08"
 };
 
 const captureEngines = {
@@ -2922,6 +2922,14 @@ function isMemoryConstrainedDevice() {
   return isIOS || (navigator.deviceMemory && navigator.deviceMemory <= 4);
 }
 
+function isMobileLiveDevice() {
+  const ua = navigator.userAgent || "";
+  const touchDevice = navigator.maxTouchPoints > 0 || "ontouchstart" in window;
+  const smallScreen = window.matchMedia?.("(max-width: 820px)")?.matches || window.innerWidth <= 820;
+  const mobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+  return isMemoryConstrainedDevice() || mobileUA || (touchDevice && smallScreen);
+}
+
 function compactLandmarks(landmarks) {
   return (landmarks || []).map((point) => ({
     x: Number(point.x.toFixed(5)),
@@ -3918,7 +3926,7 @@ const VideoPane = forwardRef(function VideoPane(
 
     if (lastVideoTimeRef.current !== video.currentTime) {
       const now = performance.now();
-      const liveInterval = mode === "camera" && isMemoryConstrainedDevice()
+      const liveInterval = mode === "camera" && isMobileLiveDevice()
         ? liveDetectionIntervals.mobileCameraPoseMs
         : liveDetectionIntervals.desktopMs;
       const canRunLiveDetection = now - lastLiveDetectionAtRef.current >= liveInterval;
@@ -3966,9 +3974,9 @@ const VideoPane = forwardRef(function VideoPane(
       const landmarks = result.landmarks?.[0] || [];
       if (landmarks.length && isInsideAnalysisRange) drawVideoSkeleton(ctx, landmarks, canvas, video, side);
       let hands = [];
-      const allowLiveHands = !(mode === "camera" && isMemoryConstrainedDevice());
+      const allowLiveHands = !(mode === "camera" && isMobileLiveDevice());
       if (allowLiveHands && handLandmarker && isInsideAnalysisRange) {
-        const handInterval = mode === "camera" && isMemoryConstrainedDevice()
+        const handInterval = mode === "camera" && isMobileLiveDevice()
           ? liveDetectionIntervals.mobileCameraHandsMs
           : liveDetectionIntervals.desktopMs;
         const canRunHandDetection = now - lastHandDetectionAtRef.current >= handInterval;
@@ -4031,7 +4039,7 @@ const VideoPane = forwardRef(function VideoPane(
     setError("");
     try {
       stopCamera();
-      const mobileSafe = isMemoryConstrainedDevice();
+      const mobileSafe = isMobileLiveDevice();
       const stream = await navigator.mediaDevices.getUserMedia({
         video: mobileSafe
           ? { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } }
